@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -45,14 +45,15 @@
 
 #define PARSE_REGEX  "^\\s*(!?\\s*[0-9]{1,3}|!?\\s*[xX][0-9a-fA-F]{1,2})\\s*$"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
 static int DetectTosSetup(DetectEngineCtx *, Signature *, const char *);
-static int DetectTosMatch(ThreadVars *, DetectEngineThreadCtx *, Packet *,
+static int DetectTosMatch(DetectEngineThreadCtx *, Packet *,
                           const Signature *, const SigMatchCtx *);
+#ifdef UNITTESTS
 static void DetectTosRegisterTests(void);
-static void DetectTosFree(void *);
+#endif
+static void DetectTosFree(DetectEngineCtx *, void *);
 
 #define DETECT_IPTOS_MIN 0
 #define DETECT_IPTOS_MAX 255
@@ -63,14 +64,19 @@ static void DetectTosFree(void *);
 void DetectTosRegister(void)
 {
     sigmatch_table[DETECT_TOS].name = "tos";
+    sigmatch_table[DETECT_TOS].desc = "match on specific decimal values of the IP header TOS field";
     sigmatch_table[DETECT_TOS].Match = DetectTosMatch;
     sigmatch_table[DETECT_TOS].Setup = DetectTosSetup;
     sigmatch_table[DETECT_TOS].Free = DetectTosFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_TOS].RegisterTests = DetectTosRegisterTests;
+#endif
     sigmatch_table[DETECT_TOS].flags =
         (SIGMATCH_QUOTES_OPTIONAL|SIGMATCH_HANDLE_NEGATION);
+    sigmatch_table[DETECT_TOS].url =
+        "/rules/header-keywords.html#tos";
 
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 /**
@@ -84,7 +90,7 @@ void DetectTosRegister(void)
  * \retval 0 no match
  * \retval 1 match
  */
-static int DetectTosMatch(ThreadVars *tv, DetectEngineThreadCtx *det_ctx, Packet *p,
+static int DetectTosMatch(DetectEngineThreadCtx *det_ctx, Packet *p,
                    const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectTosData *tosd = (const DetectTosData *)ctx;
@@ -105,13 +111,10 @@ static int DetectTosMatch(ThreadVars *tv, DetectEngineThreadCtx *det_ctx, Packet
 static DetectTosData *DetectTosParse(const char *arg, bool negate)
 {
     DetectTosData *tosd = NULL;
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
 
-    ret = pcre_exec(parse_regex, parse_regex_study, arg, strlen(arg), 0, 0,
-                    ov, MAX_SUBSTRINGS);
-
+    ret = DetectParsePcreExec(&parse_regex, arg, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret != 2) {
         SCLogError(SC_ERR_PCRE_MATCH, "invalid tos option - %s. "
                    "The tos option value must be in the range "
@@ -119,31 +122,31 @@ static DetectTosData *DetectTosParse(const char *arg, bool negate)
         goto error;
     }
 
-    const char *str_ptr;
-    res = pcre_get_substring((char *)arg, ov, MAX_SUBSTRINGS, 1,
-                             &str_ptr);
+    /* For TOS value */
+    char tosbytes_str[64] = "";
+    res = pcre_copy_substring((char *)arg, ov, MAX_SUBSTRINGS, 1,
+                             tosbytes_str, sizeof(tosbytes_str));
     if (res < 0) {
-        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_copy_substring failed");
         goto error;
     }
 
     int64_t tos = 0;
 
-    if (*str_ptr == 'x' || *str_ptr == 'X') {
-        int r = ByteExtractStringSigned(&tos, 16, 0, str_ptr + 1);
-        if (r < 0) {
+    if (tosbytes_str[0] == 'x' || tosbytes_str[0] == 'X') {
+        if (StringParseInt64(&tos, 16, 0, &tosbytes_str[1]) < 0) {
             goto error;
         }
     } else {
-        int r = ByteExtractStringSigned(&tos, 10, 0, str_ptr);
-        if (r < 0) {
+        if (StringParseInt64(&tos, 10, 0, &tosbytes_str[0]) < 0) {
             goto error;
         }
     }
+
     if (!(tos >= DETECT_IPTOS_MIN && tos <= DETECT_IPTOS_MAX)) {
         SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid tos argument - "
                    "%s.  The tos option value must be in the range "
-                   "%u - %u", str_ptr, DETECT_IPTOS_MIN, DETECT_IPTOS_MAX);
+                   "%u - %u", tosbytes_str, DETECT_IPTOS_MIN, DETECT_IPTOS_MAX);
         goto error;
     }
 
@@ -178,7 +181,7 @@ static int DetectTosSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg
 
     SigMatch *sm = SigMatchAlloc();
     if (sm == NULL) {
-        DetectTosFree(tosd);
+        DetectTosFree(de_ctx, tosd);
         return -1;
     }
 
@@ -195,7 +198,7 @@ static int DetectTosSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg
  *
  * \param tosd Data to be freed.
  */
-static void DetectTosFree(void *tosd)
+static void DetectTosFree(DetectEngineCtx *de_ctx, void *tosd)
 {
     SCFree(tosd);
 }
@@ -209,7 +212,7 @@ static int DetectTosTest01(void)
     DetectTosData *tosd = NULL;
     tosd = DetectTosParse("12", false);
     if (tosd != NULL && tosd->tos == 12 && !tosd->negated) {
-        DetectTosFree(tosd);
+        DetectTosFree(NULL, tosd);
         return 1;
     }
 
@@ -221,7 +224,7 @@ static int DetectTosTest02(void)
     DetectTosData *tosd = NULL;
     tosd = DetectTosParse("123", false);
     if (tosd != NULL && tosd->tos == 123 && !tosd->negated) {
-        DetectTosFree(tosd);
+        DetectTosFree(NULL, tosd);
         return 1;
     }
 
@@ -233,7 +236,7 @@ static int DetectTosTest04(void)
     DetectTosData *tosd = NULL;
     tosd = DetectTosParse("256", false);
     if (tosd != NULL) {
-        DetectTosFree(tosd);
+        DetectTosFree(NULL, tosd);
         return 0;
     }
 
@@ -245,7 +248,7 @@ static int DetectTosTest05(void)
     DetectTosData *tosd = NULL;
     tosd = DetectTosParse("boom", false);
     if (tosd != NULL) {
-        DetectTosFree(tosd);
+        DetectTosFree(NULL, tosd);
         return 0;
     }
 
@@ -257,7 +260,7 @@ static int DetectTosTest06(void)
     DetectTosData *tosd = NULL;
     tosd = DetectTosParse("x12", false);
     if (tosd != NULL && tosd->tos == 0x12 && !tosd->negated) {
-        DetectTosFree(tosd);
+        DetectTosFree(NULL, tosd);
         return 1;
     }
 
@@ -269,7 +272,7 @@ static int DetectTosTest07(void)
     DetectTosData *tosd = NULL;
     tosd = DetectTosParse("X12", false);
     if (tosd != NULL && tosd->tos == 0x12 && !tosd->negated) {
-        DetectTosFree(tosd);
+        DetectTosFree(NULL, tosd);
         return 1;
     }
 
@@ -281,7 +284,7 @@ static int DetectTosTest08(void)
     DetectTosData *tosd = NULL;
     tosd = DetectTosParse("x121", false);
     if (tosd != NULL) {
-        DetectTosFree(tosd);
+        DetectTosFree(NULL, tosd);
         return 0;
     }
 
@@ -293,7 +296,7 @@ static int DetectTosTest09(void)
     DetectTosData *tosd = NULL;
     tosd = DetectTosParse("12", true);
     if (tosd != NULL && tosd->tos == 12 && tosd->negated) {
-        DetectTosFree(tosd);
+        DetectTosFree(NULL, tosd);
         return 1;
     }
 
@@ -305,7 +308,7 @@ static int DetectTosTest10(void)
     DetectTosData *tosd = NULL;
     tosd = DetectTosParse("x12", true);
     if (tosd != NULL && tosd->tos == 0x12 && tosd->negated) {
-        DetectTosFree(tosd);
+        DetectTosFree(NULL, tosd);
         return 1;
     }
 
@@ -347,11 +350,8 @@ end:
     return result;
 }
 
-#endif
-
 void DetectTosRegisterTests(void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("DetectTosTest01", DetectTosTest01);
     UtRegisterTest("DetectTosTest02", DetectTosTest02);
     UtRegisterTest("DetectTosTest04", DetectTosTest04);
@@ -362,6 +362,6 @@ void DetectTosRegisterTests(void)
     UtRegisterTest("DetectTosTest09", DetectTosTest09);
     UtRegisterTest("DetectTosTest10", DetectTosTest10);
     UtRegisterTest("DetectTosTest12", DetectTosTest12);
-#endif
     return;
 }
+#endif

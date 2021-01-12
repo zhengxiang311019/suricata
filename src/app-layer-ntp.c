@@ -33,10 +33,7 @@
 #include "app-layer-parser.h"
 
 #include "app-layer-ntp.h"
-
-#if defined(HAVE_RUST)
-
-#include "rust-ntp-ntp-gen.h"
+#include "rust.h"
 
 void RegisterNTPParsers(void)
 {
@@ -56,11 +53,3 @@ void NTPParserRegisterTests(void)
 #ifdef UNITTESTS
 #endif
 }
-
-#else /* HAVE_RUST */
-
-void RegisterNTPParsers(void)
-{
-}
-
-#endif /* HAVE_RUST */

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2016 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -51,21 +51,15 @@
 #include "stream-tcp.h"
 #include "app-layer-ssl.h"
 
-/**
- * \brief Regex for parsing "id" option, matching number or "number"
- */
-#define PARSE_REGEX  "^\\s*(!?[A-z0-9.]+)\\s*,?\\s*(!?[A-z0-9.]+)?\\s*\\,?\\s*" \
-        "(!?[A-z0-9.]+)?\\s*,?\\s*(!?[A-z0-9.]+)?\\s*,?\\s*(!?[A-z0-9.]+)?\\s*$"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
-
-static int DetectSslVersionMatch(ThreadVars *, DetectEngineThreadCtx *,
+static int DetectSslVersionMatch(DetectEngineThreadCtx *,
         Flow *, uint8_t, void *, void *,
         const Signature *, const SigMatchCtx *);
 static int DetectSslVersionSetup(DetectEngineCtx *, Signature *, const char *);
+#ifdef UNITTESTS
 static void DetectSslVersionRegisterTests(void);
-static void DetectSslVersionFree(void *);
+#endif
+static void DetectSslVersionFree(DetectEngineCtx *, void *);
 static int g_tls_generic_list_id = 0;
 
 /**
@@ -74,12 +68,14 @@ static int g_tls_generic_list_id = 0;
 void DetectSslVersionRegister(void)
 {
     sigmatch_table[DETECT_AL_SSL_VERSION].name = "ssl_version";
+    sigmatch_table[DETECT_AL_SSL_VERSION].desc = "match version of SSL/TLS record";
+    sigmatch_table[DETECT_AL_SSL_VERSION].url = "/rules/tls-keywords.html#ssl-version";
     sigmatch_table[DETECT_AL_SSL_VERSION].AppLayerTxMatch = DetectSslVersionMatch;
     sigmatch_table[DETECT_AL_SSL_VERSION].Setup = DetectSslVersionSetup;
     sigmatch_table[DETECT_AL_SSL_VERSION].Free  = DetectSslVersionFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_AL_SSL_VERSION].RegisterTests = DetectSslVersionRegisterTests;
-
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+#endif
 
     g_tls_generic_list_id = DetectBufferTypeRegister("tls_generic");
 }
@@ -95,7 +91,7 @@ void DetectSslVersionRegister(void)
  * \retval 0 no match
  * \retval 1 match
  */
-static int DetectSslVersionMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectSslVersionMatch(DetectEngineThreadCtx *det_ctx,
         Flow *f, uint8_t flags, void *state, void *txv,
         const Signature *s, const SigMatchCtx *m)
 {
@@ -178,108 +174,97 @@ static int DetectSslVersionMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
     SCReturnInt(ret ^ ((ssl->data[sig_ver].flags & DETECT_SSL_VERSION_NEGATED) ? 1 : 0));
 }
 
+struct SSLVersionKeywords {
+    const char *word;
+    int index;
+    int value;
+};
+
+struct SSLVersionKeywords ssl_version_keywords[TLS_SIZE] = {
+    { "sslv2", SSLv2, SSL_VERSION_2 },
+    { "sslv3", SSLv3, SSL_VERSION_3 },
+    { "tls1.0", TLS10, TLS_VERSION_10 },
+    { "tls1.1", TLS11, TLS_VERSION_11 },
+    { "tls1.2", TLS12, TLS_VERSION_12 },
+    { "tls1.3", TLS13, TLS_VERSION_13 },
+};
+
 /**
  * \brief This function is used to parse ssl_version data passed via
  *        keyword: "ssl_version"
  *
+ * \param de_ctx Pointer to the detection engine context
  * \param str Pointer to the user provided options
  *
  * \retval ssl pointer to DetectSslVersionData on success
  * \retval NULL on failure
  */
-static DetectSslVersionData *DetectSslVersionParse(const char *str)
+static DetectSslVersionData *DetectSslVersionParse(DetectEngineCtx *de_ctx, const char *str)
 {
     DetectSslVersionData *ssl = NULL;
-	#define MAX_SUBSTRINGS 30
-    int ret = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
+    const char *tmp_str = str;
+    size_t tmp_len = 0;
+    uint8_t found = 0;
 
-    ret = pcre_exec(parse_regex, parse_regex_study, str, strlen(str), 0, 0,
-                    ov, MAX_SUBSTRINGS);
+    /* We have a correct ssl_version options */
+    ssl = SCCalloc(1, sizeof(DetectSslVersionData));
+    if (unlikely(ssl == NULL))
+        goto error;
 
-    if (ret < 1 || ret > 5) {
-        SCLogError(SC_ERR_PCRE_MATCH, "invalid ssl_version option");
+    // skip leading space
+    while (tmp_str[0] != 0 && isspace(tmp_str[0])) {
+        tmp_str++;
+    }
+    if (tmp_str[0] == 0) {
+        SCLogError(SC_ERR_INVALID_VALUE, "Invalid empty value");
         goto error;
     }
+    // iterate every version separated by comma
+    while (tmp_str[0] != 0) {
+        uint8_t neg = 0;
+        if (tmp_str[0] == '!') {
+            neg = 1;
+            tmp_str++;
+        }
+        // counts word length
+        tmp_len = 0;
+        while (tmp_str[tmp_len] != 0 && !isspace(tmp_str[tmp_len]) && tmp_str[tmp_len] != ',') {
+            tmp_len++;
+        }
 
-    if (ret > 1) {
-        const char *str_ptr;
-        char *orig;
-        uint8_t found = 0, neg = 0;
-        char *tmp_str;
-
-        /* We have a correct ssl_version options */
-        ssl = SCCalloc(1, sizeof (DetectSslVersionData));
-        if (unlikely(ssl == NULL))
+        bool is_keyword = false;
+        for (size_t i = 0; i < TLS_SIZE; i++) {
+            if (tmp_len == strlen(ssl_version_keywords[i].word) &&
+                    strncasecmp(ssl_version_keywords[i].word, tmp_str, tmp_len) == 0) {
+                if (ssl->data[ssl_version_keywords[i].index].ver != 0) {
+                    SCLogError(SC_ERR_INVALID_VALUE, "Invalid duplicate value");
+                    goto error;
+                }
+                ssl->data[ssl_version_keywords[i].index].ver = ssl_version_keywords[i].value;
+                if (neg == 1)
+                    ssl->data[ssl_version_keywords[i].index].flags |= DETECT_SSL_VERSION_NEGATED;
+                is_keyword = true;
+                break;
+            }
+        }
+        if (!is_keyword) {
+            SCLogError(SC_ERR_INVALID_VALUE, "Invalid unknown value");
             goto error;
+        }
 
-        int i;
-        for (i = 1; i < ret; i++) {
-            res = pcre_get_substring((char *) str, ov, MAX_SUBSTRINGS, i, &str_ptr);
-            if (res < 0) {
-                SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
-                if (found == 0)
-                    goto error;
-                break;
-            }
+        /* check consistency between negative and positive values :
+         * if there is a negative value, it overrides positive values
+         */
+        if (found == 0) {
+            found |= 1 << neg;
+        } else if (found != 1 << neg) {
+            SCLogError(SC_ERR_INVALID_VALUE, "Invalid value mixing negative and positive forms");
+            goto error;
+        }
 
-            orig = SCStrdup((char*) str_ptr);
-            if (unlikely(orig == NULL)) {
-                goto error;
-            }
-            tmp_str = orig;
-
-            /* Let's see if we need to scape "'s */
-            if (tmp_str[0] == '"') {
-                tmp_str[strlen(tmp_str) - 1] = '\0';
-                tmp_str += 1;
-            }
-
-
-            if (tmp_str[0] == '!') {
-                neg = 1;
-                tmp_str++;
-            }
-
-            if (strcasecmp("sslv2", tmp_str) == 0) {
-                ssl->data[SSLv2].ver = SSL_VERSION_2;
-                if (neg == 1)
-                    ssl->data[SSLv2].flags |= DETECT_SSL_VERSION_NEGATED;
-            } else if (strcasecmp("sslv3", tmp_str) == 0) {
-                ssl->data[SSLv3].ver = SSL_VERSION_3;
-                if (neg == 1)
-                    ssl->data[SSLv3].flags |= DETECT_SSL_VERSION_NEGATED;
-            } else if (strcasecmp("tls1.0", tmp_str) == 0) {
-                ssl->data[TLS10].ver = TLS_VERSION_10;
-                if (neg == 1)
-                    ssl->data[TLS10].flags |= DETECT_SSL_VERSION_NEGATED;
-            } else if (strcasecmp("tls1.1", tmp_str) == 0) {
-                ssl->data[TLS11].ver = TLS_VERSION_11;
-                if (neg == 1)
-                    ssl->data[TLS11].flags |= DETECT_SSL_VERSION_NEGATED;
-            } else if (strcasecmp("tls1.2", tmp_str) == 0) {
-                ssl->data[TLS12].ver = TLS_VERSION_12;
-                if (neg == 1)
-                    ssl->data[TLS12].flags |= DETECT_SSL_VERSION_NEGATED;
-            } else if (strcasecmp("tls1.3", tmp_str) == 0) {
-                ssl->data[TLS13].ver = TLS_VERSION_13;
-                if (neg == 1)
-                    ssl->data[TLS13].flags |= DETECT_SSL_VERSION_NEGATED;
-            }  else if (strcmp(tmp_str, "") == 0) {
-                SCFree(orig);
-                if (found == 0)
-                    goto error;
-                break;
-            } else {
-                SCLogError(SC_ERR_INVALID_VALUE, "Invalid value");
-                SCFree(orig);
-                goto error;
-            }
-
-            found = 1;
-            neg = 0;
-            SCFree(orig);
-            pcre_free_substring(str_ptr);
+        tmp_str += tmp_len;
+        while (isspace(tmp_str[0]) || tmp_str[0] == ',') {
+            tmp_str++;
         }
     }
 
@@ -287,7 +272,7 @@ static DetectSslVersionData *DetectSslVersionParse(const char *str)
 
 error:
     if (ssl != NULL)
-        DetectSslVersionFree(ssl);
+        DetectSslVersionFree(de_ctx, ssl);
     return NULL;
 
 }
@@ -311,7 +296,7 @@ static int DetectSslVersionSetup (DetectEngineCtx *de_ctx, Signature *s, const c
     if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
         return -1;
 
-    ssl = DetectSslVersionParse(str);
+    ssl = DetectSslVersionParse(de_ctx, str);
     if (ssl == NULL)
         goto error;
 
@@ -329,7 +314,7 @@ static int DetectSslVersionSetup (DetectEngineCtx *de_ctx, Signature *s, const c
 
 error:
     if (ssl != NULL)
-        DetectSslVersionFree(ssl);
+        DetectSslVersionFree(de_ctx, ssl);
     if (sm != NULL)
         SCFree(sm);
     return -1;
@@ -340,257 +325,12 @@ error:
  *
  * \param id_d pointer to DetectSslVersionData
  */
-void DetectSslVersionFree(void *ptr)
+void DetectSslVersionFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     if (ptr != NULL)
         SCFree(ptr);
 }
 
-/**********************************Unittests***********************************/
-
-#ifdef UNITTESTS /* UNITTESTS */
-
-/**
- * \test DetectSslVersionTestParse01 is a test to make sure that we parse the
- *      "ssl_version" option correctly when given valid ssl_version option
- */
-static int DetectSslVersionTestParse01(void)
-{
-    DetectSslVersionData *ssl = NULL;
-    ssl = DetectSslVersionParse("SSlv3");
-    FAIL_IF_NULL(ssl);
-    FAIL_IF_NOT(ssl->data[SSLv3].ver == SSL_VERSION_3);
-    DetectSslVersionFree(ssl);
-    PASS;
-}
-
-/**
- * \test DetectSslVersionTestParse02 is a test to make sure that we parse the
- *      "ssl_version" option correctly when given an invalid ssl_version option
- *       it should return ssl = NULL
- */
-static int DetectSslVersionTestParse02(void)
-{
-    DetectSslVersionData *ssl = NULL;
-    ssl = DetectSslVersionParse("2.5");
-    FAIL_IF_NOT_NULL(ssl);
-    DetectSslVersionFree(ssl);
-    PASS;
-}
-
-/**
- * \test DetectSslVersionTestParse03 is a test to make sure that we parse the
- *      "ssl_version" options correctly when given valid ssl_version options
- */
-static int DetectSslVersionTestParse03(void)
-{
-    DetectSslVersionData *ssl = NULL;
-    ssl = DetectSslVersionParse("SSlv3,tls1.0, !tls1.2");
-    FAIL_IF_NULL(ssl);
-    FAIL_IF_NOT(ssl->data[SSLv3].ver == SSL_VERSION_3);
-    FAIL_IF_NOT(ssl->data[TLS10].ver == TLS_VERSION_10);
-    FAIL_IF_NOT(ssl->data[TLS12].ver == TLS_VERSION_12);
-    FAIL_IF_NOT(ssl->data[TLS12].flags & DETECT_SSL_VERSION_NEGATED);
-    DetectSslVersionFree(ssl);
-    PASS;
-}
-
-#include "stream-tcp-reassemble.h"
-
-/** \test Send a get request in three chunks + more data. */
-static int DetectSslVersionTestDetect01(void)
-{
-    Flow f;
-    uint8_t sslbuf1[] = { 0x16 };
-    uint32_t ssllen1 = sizeof(sslbuf1);
-    uint8_t sslbuf2[] = { 0x03 };
-    uint32_t ssllen2 = sizeof(sslbuf2);
-    uint8_t sslbuf3[] = { 0x01 };
-    uint32_t ssllen3 = sizeof(sslbuf3);
-    uint8_t sslbuf4[] = { 0x01, 0x00, 0x00, 0xad, 0x03, 0x01 };
-    uint32_t ssllen4 = sizeof(sslbuf4);
-    TcpSession ssn;
-    Packet *p = NULL;
-    Signature *s = NULL;
-    ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx = NULL;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&th_v, 0, sizeof(th_v));
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-
-    p = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
-
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    p->flow = &f;
-    p->flowflags |= FLOW_PKT_TOSERVER;
-    p->flowflags |= FLOW_PKT_ESTABLISHED;
-    p->flags |= PKT_HAS_FLOW | PKT_STREAM_EST;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    FAIL_IF_NULL(de_ctx);
-
-    de_ctx->flags |= DE_QUIET;
-
-    s = de_ctx->sig_list = SigInit(de_ctx,"alert tls any any -> any any (msg:\"TLS\"; ssl_version:tls1.0; sid:1;)");
-    FAIL_IF_NULL(s);
-
-    SigGroupBuild(de_ctx);
-    DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, sslbuf1, ssllen1);
-    FAIL_IF(r != 0);
-
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            sslbuf2, ssllen2);
-    FAIL_IF(r != 0);
-
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            sslbuf3, ssllen3);
-    FAIL_IF(r != 0);
-
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            sslbuf4, ssllen4);
-    FAIL_IF(r != 0);
-    FLOWLOCK_UNLOCK(&f);
-
-    SSLState *app_state = f.alstate;
-    FAIL_IF_NULL(app_state);
-
-    FAIL_IF(app_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(app_state->client_connp.version != TLS_VERSION_10);
-
-    SCLogDebug("app_state is at %p, app_state->server_connp.version 0x%02X app_state->client_connp.version 0x%02X",
-        app_state, app_state->server_connp.version, app_state->client_connp.version);
-
-    /* do detect */
-    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-
-    FAIL_IF_NOT(PacketAlertCheck(p, 1));
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    UTHFreePackets(&p, 1);
-
-    PASS;
-}
-
-static int DetectSslVersionTestDetect02(void)
-{
-    Flow f;
-    uint8_t sslbuf1[] = { 0x16 };
-    uint32_t ssllen1 = sizeof(sslbuf1);
-    uint8_t sslbuf2[] = { 0x03 };
-    uint32_t ssllen2 = sizeof(sslbuf2);
-    uint8_t sslbuf3[] = { 0x01 };
-    uint32_t ssllen3 = sizeof(sslbuf3);
-    uint8_t sslbuf4[] = { 0x01, 0x00, 0x00, 0xad, 0x03, 0x02 };
-    uint32_t ssllen4 = sizeof(sslbuf4);
-    TcpSession ssn;
-    Packet *p = NULL;
-    Signature *s = NULL;
-    ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx = NULL;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&th_v, 0, sizeof(th_v));
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-
-    p = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
-
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    p->flow = &f;
-    p->flowflags |= FLOW_PKT_TOSERVER;
-    p->flowflags |= FLOW_PKT_ESTABLISHED;
-    p->flags |= PKT_HAS_FLOW | PKT_STREAM_EST;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    FAIL_IF_NULL(de_ctx);
-
-    de_ctx->flags |= DE_QUIET;
-
-    s = de_ctx->sig_list = SigInit(de_ctx,"alert tls any any -> any any (msg:\"TLS\"; ssl_version:tls1.0; sid:1;)");
-    FAIL_IF_NULL(s);
-
-    SigGroupBuild(de_ctx);
-    DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, sslbuf1, ssllen1);
-    FAIL_IF(r != 0);
-
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            sslbuf2, ssllen2);
-    FAIL_IF(r != 0);
-
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            sslbuf3, ssllen3);
-    FAIL_IF(r != 0);
-
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            sslbuf4, ssllen4);
-    FAIL_IF(r != 0);
-    FLOWLOCK_UNLOCK(&f);
-
-    SSLState *app_state = f.alstate;
-    FAIL_IF_NULL(app_state);
-
-    FAIL_IF(app_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(app_state->client_connp.version != TLS_VERSION_10);
-
-    /* do detect */
-    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-
-    FAIL_IF_NOT(PacketAlertCheck(p, 1));
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-    UTHFreePackets(&p, 1);
-
-    PASS;
-}
-
-#endif /* UNITTESTS */
-
-/**
- * \brief this function registers unit tests for DetectSslVersion
- */
-static void DetectSslVersionRegisterTests(void)
-{
-#ifdef UNITTESTS /* UNITTESTS */
-    UtRegisterTest("DetectSslVersionTestParse01", DetectSslVersionTestParse01);
-    UtRegisterTest("DetectSslVersionTestParse02", DetectSslVersionTestParse02);
-    UtRegisterTest("DetectSslVersionTestParse03", DetectSslVersionTestParse03);
-    UtRegisterTest("DetectSslVersionTestDetect01",
-                   DetectSslVersionTestDetect01);
-    UtRegisterTest("DetectSslVersionTestDetect02",
-                   DetectSslVersionTestDetect02);
-#endif /* UNITTESTS */
-
-    return;
-}
+#ifdef UNITTESTS
+#include "tests/detect-ssl-version.c"
+#endif

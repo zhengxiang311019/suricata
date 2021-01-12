@@ -25,8 +25,7 @@
 #define __OUTPUT_JSON_FLOW_H__
 
 void JsonFlowLogRegister(void);
-#ifdef HAVE_LIBJANSSON
-void JsonAddFlow(Flow *f, json_t *js, json_t *hjs);
-#endif /* HAVE_LIBJANSSON */
+void EveAddFlow(Flow *f, JsonBuilder *js);
+void EveAddAppProto(Flow *f, JsonBuilder *js);
 
 #endif /* __OUTPUT_JSON_FLOW_H__ */

@@ -49,7 +49,7 @@ typedef struct TmModule_ {
     TmEcode (*ThreadDeinit)(ThreadVars *, void *);
 
     /** the packet processing function */
-    TmEcode (*Func)(ThreadVars *, Packet *, void *, PacketQueue *, PacketQueue *);
+    TmEcode (*Func)(ThreadVars *, Packet *, void *);
 
     TmEcode (*PktAcqLoop)(ThreadVars *, void *, void *);
 
@@ -61,16 +61,16 @@ typedef struct TmModule_ {
     /** global Init/DeInit */
     TmEcode (*Init)(void);
     TmEcode (*DeInit)(void);
-
+#ifdef UNITTESTS
     void (*RegisterTests)(void);
-
+#endif
     uint8_t cap_flags;   /**< Flags to indicate the capability requierment of
                              the given TmModule */
     /* Other flags used by the module */
     uint8_t flags;
 } TmModule;
 
-TmModule tmm_modules[TMM_SIZE];
+extern TmModule tmm_modules[TMM_SIZE];
 
 /**
  * Structure that output modules use to maintain private data.

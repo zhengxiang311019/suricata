@@ -17,6 +17,7 @@
 
 #ifdef UNITTESTS
 
+#include "../app-layer-htp.h"
 #include "../conf-yaml-loader.h"
 #include "../detect-parse.h"
 #include "../detect-engine-content-inspection.h"
@@ -313,14 +314,15 @@ static int SigTest06 (void)
     DetectEngineThreadCtx *det_ctx = NULL;
     Flow f;
     TcpSession ssn;
-    int result = 0;
     AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+    FAIL_IF_NULL(alp_tctx);
 
     memset(&th_v, 0, sizeof(th_v));
     memset(&f, 0, sizeof(f));
     memset(&ssn, 0, sizeof(ssn));
 
     p = UTHBuildPacket((uint8_t *)buf, buflen, IPPROTO_TCP);
+    FAIL_IF_NULL(p);
 
     FLOW_INITIALIZE(&f);
     f.protoctx = (void *)&ssn;
@@ -335,58 +337,34 @@ static int SigTest06 (void)
     StreamTcpInitConfig(TRUE);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
-
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
 
-    de_ctx->sig_list = SigInit(de_ctx,"alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"GET \"; depth:4; pcre:\"/GET (?P<pkt_http_uri>.*) HTTP\\/\\d\\.\\d\\r\\n/G\"; sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        result = 0;
-        goto end;
-    }
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"GET \"; depth:4; pcre:\"/GET (?P<pkt_http_uri>.*) HTTP\\/\\d\\.\\d\\r\\n/G\"; sid:1;)");
+    FAIL_IF_NULL(s);
 
-    de_ctx->sig_list->next = SigInit(de_ctx,"alert tcp any any -> any any (msg:\"HTTP URI test\"; uricontent:\"two\"; sid:2;)");
-    if (de_ctx->sig_list->next == NULL) {
-        result = 0;
-        goto end;
-    }
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any (msg:\"HTTP URI test\"; uricontent:\"two\"; sid:2;)");
+    FAIL_IF_NULL(s);
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
+    FAIL_IF_NULL(det_ctx);
 
-    FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP,
                                 STREAM_TOSERVER, buf, buflen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        FLOWLOCK_UNLOCK(&f);
-        goto end;
-    }
-    FLOWLOCK_UNLOCK(&f);
+    FAIL_IF(r != 0);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-    if (PacketAlertCheck(p, 1) && PacketAlertCheck(p, 2))
-        result = 1;
-    else
-        printf("sid:1 %s, sid:2 %s: ",
-            PacketAlertCheck(p, 1) ? "OK" : "FAIL",
-            PacketAlertCheck(p, 2) ? "OK" : "FAIL");
-
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
+    FAIL_IF_NOT(PacketAlertCheck(p, 1));
+    FAIL_IF_NOT(PacketAlertCheck(p, 2));
 
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
-end:
-    if (alp_tctx != NULL)
-        AppLayerParserThreadCtxFree(alp_tctx);
+    AppLayerParserThreadCtxFree(alp_tctx);
     UTHFreePackets(&p, 1);
     StreamTcpFreeConfig(TRUE);
     FLOW_DESTROY(&f);
-    return result;
+    PASS;
 }
 
 static int SigTest07 (void)
@@ -3437,7 +3415,7 @@ static int SigTest36ContentAndIsdataatKeywords01 (void)
     memset(&th_v, 0, sizeof(th_v));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeEthernet(&th_v, &dtv, p, raw_eth, sizeof(raw_eth), NULL);
+    DecodeEthernet(&th_v, &dtv, p, raw_eth, sizeof(raw_eth));
 
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
@@ -3556,7 +3534,7 @@ static int SigTest37ContentAndIsdataatKeywords02 (void)
     memset(&th_v, 0, sizeof(th_v));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeEthernet(&th_v, &dtv, p, raw_eth, sizeof(raw_eth), NULL);
+    DecodeEthernet(&th_v, &dtv, p, raw_eth, sizeof(raw_eth));
 
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
@@ -3683,7 +3661,7 @@ static int SigTest40NoPacketInspection01(void)
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx,(void *)&det_ctx);
     det_ctx->de_ctx = de_ctx;
 
-    Detect(&th_v, p, det_ctx, &pq, NULL);
+    Detect(&th_v, p, det_ctx);
     if (PacketAlertCheck(p, 2))
         result = 0;
     else
@@ -4302,7 +4280,7 @@ static int SigTestWithin01 (void)
     if (unlikely(p1 == NULL))
         return 0;
     memset(p1, 0, SIZE_OF_PACKET);
-    DecodeEthernet(&th_v, &dtv, p1, rawpkt1, sizeof(rawpkt1), NULL);
+    DecodeEthernet(&th_v, &dtv, p1, rawpkt1, sizeof(rawpkt1));
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p1);
     if (!(PacketAlertCheck(p1, 556))) {
         printf("failed to match on packet 1: ");
@@ -4314,7 +4292,7 @@ static int SigTestWithin01 (void)
     if (unlikely(p2 == NULL))
         return 0;
     memset(p2, 0, SIZE_OF_PACKET);
-    DecodeEthernet(&th_v, &dtv, p2, rawpkt2, sizeof(rawpkt2), NULL);
+    DecodeEthernet(&th_v, &dtv, p2, rawpkt2, sizeof(rawpkt2));
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p2);
     if (!(PacketAlertCheck(p2, 556))) {
         printf("failed to match on packet 2: ");
@@ -4326,7 +4304,7 @@ static int SigTestWithin01 (void)
     if (unlikely(p3 == NULL))
         return 0;
     memset(p3, 0, SIZE_OF_PACKET);
-    DecodeEthernet(&th_v, &dtv, p3, rawpkt3, sizeof(rawpkt3), NULL);
+    DecodeEthernet(&th_v, &dtv, p3, rawpkt3, sizeof(rawpkt3));
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p3);
     if (!(PacketAlertCheck(p3, 556))) {
         printf("failed to match on packet 3: ");
@@ -4338,7 +4316,7 @@ static int SigTestWithin01 (void)
     if (unlikely(p4 == NULL))
         return 0;
     memset(p4, 0, SIZE_OF_PACKET);
-    DecodeEthernet(&th_v, &dtv, p4, rawpkt4, sizeof(rawpkt4), NULL);
+    DecodeEthernet(&th_v, &dtv, p4, rawpkt4, sizeof(rawpkt4));
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p4);
     if (!(PacketAlertCheck(p4, 556))) {
         printf("failed to match on packet 4: ");
@@ -4454,20 +4432,20 @@ static int SigTestDetectAlertCounter(void)
     StatsSetupPrivate(&tv);
 
     p = UTHBuildPacket((uint8_t *)"boo", strlen("boo"), IPPROTO_TCP);
-    Detect(&tv, p, det_ctx, NULL, NULL);
+    Detect(&tv, p, det_ctx);
     FAIL_IF_NOT(StatsGetLocalCounterValue(&tv, det_ctx->counter_alerts) == 1);
 
-    Detect(&tv, p, det_ctx, NULL, NULL);
+    Detect(&tv, p, det_ctx);
     FAIL_IF_NOT(StatsGetLocalCounterValue(&tv, det_ctx->counter_alerts) == 2);
     UTHFreePackets(&p, 1);
 
     p = UTHBuildPacket((uint8_t *)"roo", strlen("roo"), IPPROTO_TCP);
-    Detect(&tv, p, det_ctx, NULL, NULL);
+    Detect(&tv, p, det_ctx);
     FAIL_IF_NOT(StatsGetLocalCounterValue(&tv, det_ctx->counter_alerts) == 2);
     UTHFreePackets(&p, 1);
 
     p = UTHBuildPacket((uint8_t *)"laboosa", strlen("laboosa"), IPPROTO_TCP);
-    Detect(&tv, p, det_ctx, NULL, NULL);
+    Detect(&tv, p, det_ctx);
     FAIL_IF_NOT(StatsGetLocalCounterValue(&tv, det_ctx->counter_alerts) == 3);
     UTHFreePackets(&p, 1);
 

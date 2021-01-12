@@ -37,9 +37,9 @@ typedef struct DetectFileHashData_ {
 int ReadHashString(uint8_t *, const char *, const char *, int, uint16_t);
 int LoadHashTable(ROHashTable *, const char *, const char *, int, uint32_t);
 
-int DetectFileHashMatch(ThreadVars *, DetectEngineThreadCtx *, Flow *, uint8_t,
+int DetectFileHashMatch(DetectEngineThreadCtx *, Flow *, uint8_t,
         File *, const Signature *, const SigMatchCtx *);
 int DetectFileHashSetup(DetectEngineCtx *, Signature *, const char *, uint32_t, int);
-void DetectFileHashFree(void *);
+void DetectFileHashFree(DetectEngineCtx *, void *);
 
 #endif /* __UTIL_DETECT_FILE_HASH_H__ */

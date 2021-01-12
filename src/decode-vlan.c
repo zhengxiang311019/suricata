@@ -44,9 +44,6 @@
 #include "util-profiling.h"
 #include "host.h"
 
-static int DecodeIEEE8021ah(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
-        uint8_t *pkt, uint16_t len, PacketQueue *pq);
-
 /**
  * \internal
  * \brief this function is used to decode IEEE802.1q packets
@@ -59,7 +56,8 @@ static int DecodeIEEE8021ah(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
  * \param pq pointer to the packet queue
  *
  */
-int DecodeVLAN(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt, uint32_t len, PacketQueue *pq)
+int DecodeVLAN(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
+        const uint8_t *pkt, uint32_t len)
 {
     uint32_t proto;
 
@@ -77,68 +75,23 @@ int DecodeVLAN(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt, u
         return TM_ECODE_FAILED;
     }
 
-    p->vlanh[p->vlan_idx] = (VLANHdr *)pkt;
-    if(p->vlanh[p->vlan_idx] == NULL)
+    VLANHdr *vlan_hdr = (VLANHdr *)pkt;
+    if(vlan_hdr == NULL)
         return TM_ECODE_FAILED;
 
-    proto = GET_VLAN_PROTO(p->vlanh[p->vlan_idx]);
+    proto = GET_VLAN_PROTO(vlan_hdr);
 
     SCLogDebug("p %p pkt %p VLAN protocol %04x VLAN PRI %d VLAN CFI %d VLAN ID %d Len: %" PRIu32 "",
-            p, pkt, proto, GET_VLAN_PRIORITY(p->vlanh[p->vlan_idx]),
-            GET_VLAN_CFI(p->vlanh[p->vlan_idx]), GET_VLAN_ID(p->vlanh[p->vlan_idx]), len);
+            p, pkt, proto, GET_VLAN_PRIORITY(vlan_hdr), GET_VLAN_CFI(vlan_hdr),
+            GET_VLAN_ID(vlan_hdr), len);
 
-    /* only store the id for flow hashing if it's not disabled. */
-    if (dtv->vlan_disabled == 0)
-        p->vlan_id[p->vlan_idx] = (uint16_t)GET_VLAN_ID(p->vlanh[p->vlan_idx]);
+    p->vlan_id[p->vlan_idx++] = (uint16_t)GET_VLAN_ID(vlan_hdr);
 
-    p->vlan_idx++;
-
-    switch (proto)   {
-        case ETHERNET_TYPE_IP:
-            if (unlikely(len > VLAN_HEADER_LEN + USHRT_MAX)) {
-                return TM_ECODE_FAILED;
-            }
-
-            DecodeIPV4(tv, dtv, p, pkt + VLAN_HEADER_LEN,
-                       len - VLAN_HEADER_LEN, pq);
-            break;
-        case ETHERNET_TYPE_IPV6:
-            if (unlikely(len > VLAN_HEADER_LEN + USHRT_MAX)) {
-                return TM_ECODE_FAILED;
-            }
-            DecodeIPV6(tv, dtv, p, pkt + VLAN_HEADER_LEN,
-                       len - VLAN_HEADER_LEN, pq);
-            break;
-        case ETHERNET_TYPE_PPPOE_SESS:
-            DecodePPPOESession(tv, dtv, p, pkt + VLAN_HEADER_LEN,
-                               len - VLAN_HEADER_LEN, pq);
-            break;
-        case ETHERNET_TYPE_PPPOE_DISC:
-            DecodePPPOEDiscovery(tv, dtv, p, pkt + VLAN_HEADER_LEN,
-                                 len - VLAN_HEADER_LEN, pq);
-            break;
-        case ETHERNET_TYPE_VLAN:
-        case ETHERNET_TYPE_8021AD:
-            if (p->vlan_idx >= 2) {
-                ENGINE_SET_EVENT(p,VLAN_HEADER_TOO_MANY_LAYERS);
-                return TM_ECODE_OK;
-            } else {
-                DecodeVLAN(tv, dtv, p, pkt + VLAN_HEADER_LEN,
-                        len - VLAN_HEADER_LEN, pq);
-            }
-            break;
-        case ETHERNET_TYPE_8021AH:
-            DecodeIEEE8021ah(tv, dtv, p, pkt + VLAN_HEADER_LEN,
-                    len - VLAN_HEADER_LEN, pq);
-            break;
-        case ETHERNET_TYPE_ARP:
-            break;
-        default:
-            SCLogDebug("unknown VLAN type: %" PRIx32 "", proto);
-            ENGINE_SET_INVALID_EVENT(p, VLAN_UNKNOWN_TYPE);
-            return TM_ECODE_OK;
+    if (DecodeNetworkLayer(tv, dtv, proto, p,
+                pkt + VLAN_HEADER_LEN, len - VLAN_HEADER_LEN) == false) {
+        ENGINE_SET_INVALID_EVENT(p, VLAN_UNKNOWN_TYPE);
+        return TM_ECODE_FAILED;
     }
-
     return TM_ECODE_OK;
 }
 
@@ -146,11 +99,8 @@ uint16_t DecodeVLANGetId(const Packet *p, uint8_t layer)
 {
     if (unlikely(layer > 1))
         return 0;
-
-    if (p->vlanh[layer] == NULL && (p->vlan_idx >= (layer + 1))) {
+    if (p->vlan_idx > layer) {
         return p->vlan_id[layer];
-    } else {
-        return GET_VLAN_ID(p->vlanh[layer]);
     }
     return 0;
 }
@@ -164,7 +114,8 @@ typedef struct IEEE8021ahHdr_ {
 
 #define IEEE8021AH_HEADER_LEN sizeof(IEEE8021ahHdr)
 
-static int DecodeIEEE8021ah(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt, uint16_t len, PacketQueue *pq)
+int DecodeIEEE8021ah(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
+        const uint8_t *pkt, uint32_t len)
 {
     StatsIncr(tv, dtv->counter_ieee8021ah);
 
@@ -174,16 +125,11 @@ static int DecodeIEEE8021ah(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, ui
     }
 
     IEEE8021ahHdr *hdr = (IEEE8021ahHdr *)pkt;
-    uint16_t next_proto = SCNtohs(hdr->type);
+    const uint16_t next_proto = SCNtohs(hdr->type);
 
-    switch (next_proto) {
-        case ETHERNET_TYPE_VLAN:
-        case ETHERNET_TYPE_8021QINQ: {
-            DecodeVLAN(tv, dtv, p, pkt + IEEE8021AH_HEADER_LEN,
-                    len - IEEE8021AH_HEADER_LEN, pq);
-            break;
-        }
-    }
+    DecodeNetworkLayer(tv, dtv, next_proto, p,
+            pkt + IEEE8021AH_HEADER_LEN, len - IEEE8021AH_HEADER_LEN);
+
     return TM_ECODE_OK;
 }
 
@@ -210,7 +156,7 @@ static int DecodeVLANtest01 (void)
     memset(&tv, 0, sizeof(ThreadVars));
     memset(&dtv, 0, sizeof(DecodeThreadVars));
 
-    DecodeVLAN(&tv, &dtv, p, raw_vlan, sizeof(raw_vlan), NULL);
+    DecodeVLAN(&tv, &dtv, p, raw_vlan, sizeof(raw_vlan));
 
     if(ENGINE_ISSET_EVENT(p,VLAN_HEADER_TOO_SMALL))  {
         SCFree(p);
@@ -246,7 +192,7 @@ static int DecodeVLANtest02 (void)
     memset(&tv, 0, sizeof(ThreadVars));
     memset(&dtv, 0, sizeof(DecodeThreadVars));
 
-    DecodeVLAN(&tv, &dtv, p, raw_vlan, sizeof(raw_vlan), NULL);
+    DecodeVLAN(&tv, &dtv, p, raw_vlan, sizeof(raw_vlan));
 
 
     if(ENGINE_ISSET_EVENT(p,VLAN_UNKNOWN_TYPE))  {
@@ -285,10 +231,10 @@ static int DecodeVLANtest03 (void)
 
     FlowInitConfig(FLOW_QUIET);
 
-    DecodeVLAN(&tv, &dtv, p, raw_vlan, sizeof(raw_vlan), NULL);
+    DecodeVLAN(&tv, &dtv, p, raw_vlan, sizeof(raw_vlan));
 
 
-    if(p->vlanh[0] == NULL) {
+    if(p->vlan_id[0] == 0) {
         goto error;
     }
 

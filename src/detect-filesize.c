@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2012 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -46,15 +46,16 @@
  */
 #define PARSE_REGEX  "^(?:\\s*)(<|>)?(?:\\s*)([0-9]{1,23}[a-zA-Z]{0,2})(?:\\s*)(?:(<>)(?:\\s*)([0-9]{1,23}[a-zA-Z]{0,2}))?\\s*$"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
 /*prototypes*/
-static int DetectFilesizeMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx, Flow *f,
+static int DetectFilesizeMatch (DetectEngineThreadCtx *det_ctx, Flow *f,
         uint8_t flags, File *file, const Signature *s, const SigMatchCtx *m);
 static int DetectFilesizeSetup (DetectEngineCtx *, Signature *, const char *);
-static void DetectFilesizeFree (void *);
+static void DetectFilesizeFree (DetectEngineCtx *, void *);
+#ifdef UNITTESTS
 static void DetectFilesizeRegisterTests (void);
+#endif
 static int g_file_match_list_id = 0;
 
 /**
@@ -65,13 +66,14 @@ void DetectFilesizeRegister(void)
 {
     sigmatch_table[DETECT_FILESIZE].name = "filesize";
     sigmatch_table[DETECT_FILESIZE].desc = "match on the size of the file as it is being transferred";
-    sigmatch_table[DETECT_FILESIZE].url = DOC_URL DOC_VERSION "/rules/file-keywords.html#filesize";
+    sigmatch_table[DETECT_FILESIZE].url = "/rules/file-keywords.html#filesize";
     sigmatch_table[DETECT_FILESIZE].FileMatch = DetectFilesizeMatch;
     sigmatch_table[DETECT_FILESIZE].Setup = DetectFilesizeSetup;
     sigmatch_table[DETECT_FILESIZE].Free = DetectFilesizeFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_FILESIZE].RegisterTests = DetectFilesizeRegisterTests;
-
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+#endif
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 
     g_file_match_list_id = DetectBufferTypeRegister("files");
 }
@@ -90,7 +92,7 @@ void DetectFilesizeRegister(void)
  * \retval 0 no match
  * \retval 1 match
  */
-static int DetectFilesizeMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx, Flow *f,
+static int DetectFilesizeMatch (DetectEngineThreadCtx *det_ctx, Flow *f,
         uint8_t flags, File *file, const Signature *s, const SigMatchCtx *m)
 {
     SCEnter();
@@ -144,12 +146,10 @@ static DetectFilesizeData *DetectFilesizeParse (const char *str)
     char *arg2 = NULL;
     char *arg3 = NULL;
     char *arg4 = NULL;
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
 
-    ret = pcre_exec(parse_regex, parse_regex_study, str, strlen(str),
-                    0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, str, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 3 || ret > 5) {
         SCLogError(SC_ERR_PCRE_PARSE, "filesize option pcre parse error: \"%s\"", str);
         goto error;
@@ -296,7 +296,7 @@ static int DetectFilesizeSetup (DetectEngineCtx *de_ctx, Signature *s, const cha
 
 error:
     if (fsd != NULL)
-        DetectFilesizeFree(fsd);
+        DetectFilesizeFree(de_ctx, fsd);
     if (sm != NULL)
         SCFree(sm);
     SCReturnInt(-1);
@@ -307,7 +307,7 @@ error:
  *
  * \param ptr pointer to DetectFilesizeData
  */
-static void DetectFilesizeFree(void *ptr)
+static void DetectFilesizeFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectFilesizeData *fsd = (DetectFilesizeData *)ptr;
     SCFree(fsd);
@@ -332,7 +332,7 @@ static int DetectFilesizeParseTest01(void)
         if (fsd->size1 == 10 && fsd->mode == DETECT_FILESIZE_EQ)
             ret = 1;
 
-        DetectFilesizeFree(fsd);
+        DetectFilesizeFree(NULL, fsd);
     }
     return ret;
 }
@@ -348,7 +348,7 @@ static int DetectFilesizeParseTest02(void)
         if (fsd->size1 == 10 && fsd->mode == DETECT_FILESIZE_LT)
             ret = 1;
 
-        DetectFilesizeFree(fsd);
+        DetectFilesizeFree(NULL, fsd);
     }
     return ret;
 }
@@ -364,7 +364,7 @@ static int DetectFilesizeParseTest03(void)
         if (fsd->size1 == 10 && fsd->mode == DETECT_FILESIZE_GT)
             ret = 1;
 
-        DetectFilesizeFree(fsd);
+        DetectFilesizeFree(NULL, fsd);
     }
     return ret;
 }
@@ -381,7 +381,7 @@ static int DetectFilesizeParseTest04(void)
             fsd->mode == DETECT_FILESIZE_RA)
             ret = 1;
 
-        DetectFilesizeFree(fsd);
+        DetectFilesizeFree(NULL, fsd);
     }
     return ret;
 }
@@ -398,7 +398,7 @@ static int DetectFilesizeParseTest05(void)
             fsd->mode == DETECT_FILESIZE_RA)
             ret = 1;
 
-        DetectFilesizeFree(fsd);
+        DetectFilesizeFree(NULL, fsd);
     }
     return ret;
 }
@@ -484,19 +484,16 @@ end:
     return res;
 }
 
-#endif /* UNITTESTS */
-
 /**
  * \brief this function registers unit tests for DetectFilesize
  */
 void DetectFilesizeRegisterTests(void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("DetectFilesizeParseTest01", DetectFilesizeParseTest01);
     UtRegisterTest("DetectFilesizeParseTest02", DetectFilesizeParseTest02);
     UtRegisterTest("DetectFilesizeParseTest03", DetectFilesizeParseTest03);
     UtRegisterTest("DetectFilesizeParseTest04", DetectFilesizeParseTest04);
     UtRegisterTest("DetectFilesizeParseTest05", DetectFilesizeParseTest05);
     UtRegisterTest("DetectFilesizeSetpTest01", DetectFilesizeSetpTest01);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

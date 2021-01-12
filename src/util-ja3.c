@@ -24,6 +24,7 @@
  */
 
 #include "suricata-common.h"
+#include "app-layer-ssl.h"
 #include "util-validate.h"
 #include "util-ja3.h"
 
@@ -76,10 +77,6 @@ void Ja3BufferFree(JA3Buffer **buffer)
 static int Ja3BufferResizeIfFull(JA3Buffer *buffer, uint32_t len)
 {
     DEBUG_VALIDATE_BUG_ON(buffer == NULL);
-
-    if (len == 0) {
-        return 0;
-    }
 
     while (buffer->used + len + 2 > buffer->size)
     {
@@ -265,22 +262,22 @@ char *Ja3GenerateHash(JA3Buffer *buffer)
  */
 int Ja3IsDisabled(const char *type)
 {
-    int is_enabled = 0;
-
-    /* Check if JA3 is enabled */
-    ConfGetBool("app-layer.protocols.tls.ja3-fingerprints", &is_enabled);
-
+    bool is_enabled = SSLJA3IsEnabled();
     if (is_enabled == 0) {
-        SCLogWarning(SC_WARN_JA3_DISABLED, "JA3 is disabled, skipping %s",
-                     type);
+        if (strcmp(type, "rule") != 0) {
+            SCLogWarning(SC_WARN_JA3_DISABLED, "JA3 is disabled, skipping %s",
+                    type);
+        }
         return 1;
     }
 
 #ifndef HAVE_NSS
     else {
-        SCLogWarning(SC_WARN_NO_JA3_SUPPORT,
-                     "no MD5 calculation support build in, skipping %s",
-                     type);
+        if (strcmp(type, "rule") != 0) {
+            SCLogWarning(SC_WARN_NO_JA3_SUPPORT,
+                    "no MD5 calculation support built in (LibNSS), skipping %s",
+                    type);
+        }
         return 1;
     }
 #endif /* HAVE_NSS */

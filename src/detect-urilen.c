@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -47,14 +47,14 @@
  */
 #define PARSE_REGEX  "^(?:\\s*)(<|>)?(?:\\s*)([0-9]{1,5})(?:\\s*)(?:(<>)(?:\\s*)([0-9]{1,5}))?\\s*(?:,\\s*(norm|raw))?\\s*$"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
 /*prototypes*/
 static int DetectUrilenSetup (DetectEngineCtx *, Signature *, const char *);
-void DetectUrilenFree (void *);
-void DetectUrilenRegisterTests (void);
-
+static void DetectUrilenFree (DetectEngineCtx *, void *);
+#ifdef UNITTESTS
+static void DetectUrilenRegisterTests (void);
+#endif
 static int g_http_uri_buffer_id = 0;
 static int g_http_raw_uri_buffer_id = 0;
 
@@ -66,13 +66,14 @@ void DetectUrilenRegister(void)
 {
     sigmatch_table[DETECT_AL_URILEN].name = "urilen";
     sigmatch_table[DETECT_AL_URILEN].desc = "match on the length of the HTTP uri";
-    sigmatch_table[DETECT_AL_URILEN].url = DOC_URL DOC_VERSION "/rules/http-keywords.html#urilen";
+    sigmatch_table[DETECT_AL_URILEN].url = "/rules/http-keywords.html#urilen";
     sigmatch_table[DETECT_AL_URILEN].Match = NULL;
     sigmatch_table[DETECT_AL_URILEN].Setup = DetectUrilenSetup;
     sigmatch_table[DETECT_AL_URILEN].Free = DetectUrilenFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_AL_URILEN].RegisterTests = DetectUrilenRegisterTests;
-
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+#endif
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 
     g_http_uri_buffer_id = DetectBufferTypeRegister("http_uri");
     g_http_raw_uri_buffer_id = DetectBufferTypeRegister("http_raw_uri");
@@ -89,19 +90,16 @@ void DetectUrilenRegister(void)
 
 static DetectUrilenData *DetectUrilenParse (const char *urilenstr)
 {
-
     DetectUrilenData *urilend = NULL;
     char *arg1 = NULL;
     char *arg2 = NULL;
     char *arg3 = NULL;
     char *arg4 = NULL;
     char *arg5 = NULL;
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
 
-    ret = pcre_exec(parse_regex, parse_regex_study, urilenstr, strlen(urilenstr),
-                    0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, urilenstr, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 3 || ret > 6) {
         SCLogError(SC_ERR_PCRE_PARSE, "urilen option pcre parse error: \"%s\"", urilenstr);
         goto error;
@@ -176,7 +174,7 @@ static DetectUrilenData *DetectUrilenParse (const char *urilenstr)
     }
 
     /** set the first urilen value */
-    if (ByteExtractStringUint16(&urilend->urilen1,10,strlen(arg2),arg2) <= 0){
+    if (StringParseUint16(&urilend->urilen1,10,strlen(arg2),arg2) <= 0){
         SCLogError(SC_ERR_INVALID_ARGUMENT,"Invalid size :\"%s\"",arg2);
         goto error;
     }
@@ -189,7 +187,7 @@ static DetectUrilenData *DetectUrilenParse (const char *urilenstr)
             goto error;
         }
 
-        if(ByteExtractStringUint16(&urilend->urilen2,10,strlen(arg4),arg4) <= 0)
+        if(StringParseUint16(&urilend->urilen2,10,strlen(arg4),arg4) <= 0)
         {
             SCLogError(SC_ERR_INVALID_ARGUMENT,"Invalid size :\"%s\"",arg4);
             goto error;
@@ -222,13 +220,15 @@ error:
     if (urilend)
         SCFree(urilend);
     if (arg1 != NULL)
-        SCFree(arg1);
+        pcre_free_substring(arg1);
     if (arg2 != NULL)
-        SCFree(arg2);
+        pcre_free_substring(arg2);
     if (arg3 != NULL)
-        SCFree(arg3);
+        pcre_free_substring(arg3);
     if (arg4 != NULL)
-        SCFree(arg4);
+        pcre_free_substring(arg4);
+    if (arg5 != NULL)
+        pcre_free_substring(arg5);
     return NULL;
 }
 
@@ -268,7 +268,7 @@ static int DetectUrilenSetup (DetectEngineCtx *de_ctx, Signature *s, const char 
     SCReturnInt(0);
 
 error:
-    DetectUrilenFree(urilend);
+    DetectUrilenFree(de_ctx, urilend);
     SCReturnInt(-1);
 }
 
@@ -277,7 +277,7 @@ error:
  *
  * \param ptr pointer to DetectUrilenData
  */
-void DetectUrilenFree(void *ptr)
+static void DetectUrilenFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     if (ptr == NULL)
         return;
@@ -385,7 +385,7 @@ static int DetectUrilenParseTest01(void)
             !urilend->raw_buffer)
             ret = 1;
 
-        DetectUrilenFree(urilend);
+        DetectUrilenFree(NULL, urilend);
     }
     return ret;
 }
@@ -402,7 +402,7 @@ static int DetectUrilenParseTest02(void)
             !urilend->raw_buffer)
             ret = 1;
 
-        DetectUrilenFree(urilend);
+        DetectUrilenFree(NULL, urilend);
     }
     return ret;
 }
@@ -419,7 +419,7 @@ static int DetectUrilenParseTest03(void)
             !urilend->raw_buffer)
             ret = 1;
 
-        DetectUrilenFree(urilend);
+        DetectUrilenFree(NULL, urilend);
     }
     return ret;
 }
@@ -437,7 +437,7 @@ static int DetectUrilenParseTest04(void)
             !urilend->raw_buffer)
             ret = 1;
 
-        DetectUrilenFree(urilend);
+        DetectUrilenFree(NULL, urilend);
     }
     return ret;
 }
@@ -455,7 +455,7 @@ static int DetectUrilenParseTest05(void)
             !urilend->raw_buffer)
             ret = 1;
 
-        DetectUrilenFree(urilend);
+        DetectUrilenFree(NULL, urilend);
     }
     return ret;
 }
@@ -473,7 +473,7 @@ static int DetectUrilenParseTest06(void)
             urilend->raw_buffer)
             ret = 1;
 
-        DetectUrilenFree(urilend);
+        DetectUrilenFree(NULL, urilend);
     }
     return ret;
 }
@@ -490,7 +490,7 @@ static int DetectUrilenParseTest07(void)
             !urilend->raw_buffer)
             ret = 1;
 
-        DetectUrilenFree(urilend);
+        DetectUrilenFree(NULL, urilend);
     }
     return ret;
 }
@@ -507,7 +507,7 @@ static int DetectUrilenParseTest08(void)
             !urilend->raw_buffer)
             ret = 1;
 
-        DetectUrilenFree(urilend);
+        DetectUrilenFree(NULL, urilend);
     }
     return ret;
 }
@@ -524,7 +524,7 @@ static int DetectUrilenParseTest09(void)
             urilend->raw_buffer)
             ret = 1;
 
-        DetectUrilenFree(urilend);
+        DetectUrilenFree(NULL, urilend);
     }
     return ret;
 }
@@ -541,7 +541,7 @@ static int DetectUrilenParseTest10(void)
             urilend->raw_buffer)
             ret = 1;
 
-        DetectUrilenFree(urilend);
+        DetectUrilenFree(NULL, urilend);
     }
     return ret;
 }
@@ -729,14 +729,11 @@ end:
     return result;
 }
 
-#endif /* UNITTESTS */
-
 /**
  * \brief this function registers unit tests for DetectUrilen
  */
 void DetectUrilenRegisterTests(void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("DetectUrilenParseTest01", DetectUrilenParseTest01);
     UtRegisterTest("DetectUrilenParseTest02", DetectUrilenParseTest02);
     UtRegisterTest("DetectUrilenParseTest03", DetectUrilenParseTest03);
@@ -749,5 +746,5 @@ void DetectUrilenRegisterTests(void)
     UtRegisterTest("DetectUrilenParseTest10", DetectUrilenParseTest10);
     UtRegisterTest("DetectUrilenSetpTest01", DetectUrilenSetpTest01);
     UtRegisterTest("DetectUrilenSigTest01", DetectUrilenSigTest01);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

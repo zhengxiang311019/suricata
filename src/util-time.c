@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2016 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -50,6 +50,14 @@
  * would be considered timed out.
  */
 
+#ifdef OS_WIN32
+/* for MinGW we need to set _POSIX_C_SOURCE before including
+ * sys/time.h. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#endif
+
 #include "suricata-common.h"
 #include "detect.h"
 #include "threads.h"
@@ -61,7 +69,7 @@ static struct timeval current_time = { 0, 0 };
 #endif
 //static SCMutex current_time_mutex = SCMUTEX_INITIALIZER;
 static SCSpinlock current_time_spinlock;
-static char live = TRUE;
+static bool live_time_tracking = true;
 
 struct tm *SCLocalTime(time_t timep, struct tm *result);
 struct tm *SCUtcTime(time_t timep, struct tm *result);
@@ -79,26 +87,33 @@ void TimeDeinit(void)
     SCSpinDestroy(&current_time_spinlock);
 }
 
+bool TimeModeIsReady(void)
+{
+    if (live_time_tracking)
+        return true;
+    return TmThreadsTimeSubsysIsReady();
+}
+
 void TimeModeSetLive(void)
 {
-    live = TRUE;
+    live_time_tracking = true;
     SCLogDebug("live time mode enabled");
 }
 
 void TimeModeSetOffline (void)
 {
-    live = FALSE;
+    live_time_tracking = false;
     SCLogDebug("offline time mode enabled");
 }
 
-int TimeModeIsLive(void)
+bool TimeModeIsLive(void)
 {
-    return live;
+    return live_time_tracking;
 }
 
 void TimeSetByThread(const int thread_id, const struct timeval *tv)
 {
-    if (live == TRUE)
+    if (live_time_tracking)
         return;
 
     TmThreadsSetThreadTimestamp(thread_id, tv);
@@ -107,7 +122,7 @@ void TimeSetByThread(const int thread_id, const struct timeval *tv)
 #ifdef UNITTESTS
 void TimeSet(struct timeval *tv)
 {
-    if (live == TRUE)
+    if (live_time_tracking)
         return;
 
     if (tv == NULL)
@@ -140,7 +155,7 @@ void TimeGet(struct timeval *tv)
     if (tv == NULL)
         return;
 
-    if (live == TRUE) {
+    if (live_time_tracking) {
         gettimeofday(tv, NULL);
     } else {
 #ifdef UNITTESTS
@@ -151,7 +166,7 @@ void TimeGet(struct timeval *tv)
             SCSpinUnlock(&current_time_spinlock);
         } else {
 #endif
-            TmreadsGetMinimalTimestamp(tv);
+            TmThreadsGetMinimalTimestamp(tv);
 #ifdef UNITTESTS
         }
 #endif
@@ -176,17 +191,40 @@ void TimeSetIncrementTime(uint32_t tv_sec)
 }
 #endif
 
+#ifdef OS_WIN32
+/** \internal
+ *  \brief wrapper around strftime on Windows to provide output
+ *         compatible with posix %z
+ */
+static inline void WinStrftime(const struct timeval *ts, const struct tm *t, char *str, size_t size)
+{
+    char time_fmt[64] = { 0 };
+    char tz[6] = { 0 };
+    const long int tzdiff = -_timezone;
+    const int h = abs(_timezone) / 3600 + _daylight;
+    const int m = (abs(_timezone) % 3600) / 60;
+    snprintf(tz, sizeof(tz), "%c%02d%02d", tzdiff < 0 ? '-' : '+', h, m);
+    strftime(time_fmt, sizeof(time_fmt), "%Y-%m-%dT%H:%M:%S.%%06u", t);
+    snprintf(str, size, time_fmt, ts->tv_usec);
+    strlcat(str, tz, size); // append our timezone
+}
+#endif
+
 void CreateIsoTimeString (const struct timeval *ts, char *str, size_t size)
 {
     time_t time = ts->tv_sec;
     struct tm local_tm;
     memset(&local_tm, 0, sizeof(local_tm));
     struct tm *t = (struct tm*)SCLocalTime(time, &local_tm);
-    char time_fmt[64] = { 0 };
 
     if (likely(t != NULL)) {
+#ifdef OS_WIN32
+        WinStrftime(ts, t, str, size);
+#else
+        char time_fmt[64] = { 0 };
         strftime(time_fmt, sizeof(time_fmt), "%Y-%m-%dT%H:%M:%S.%%06u%z", t);
         snprintf(str, size, time_fmt, ts->tv_usec);
+#endif
     } else {
         snprintf(str, size, "ts-error");
     }
@@ -227,7 +265,7 @@ struct tm *SCUtcTime(time_t timep, struct tm *result)
  */
 
 #ifndef TLS
-/* OpenBSD does not support __thread, so don't use time caching on BSD
+/* OpenBSD does not support thread_local, so don't use time caching on BSD
  */
 struct tm *SCLocalTime(time_t timep, struct tm *result)
 {
@@ -251,7 +289,7 @@ void CreateTimeString (const struct timeval *ts, char *str, size_t size)
 
 #else
 
-/* On systems supporting __thread, use Per-thread values for caching
+/* On systems supporting thread_local, use Per-thread values for caching
  * in CreateTimeString */
 
 /* The maximum possible length of the time string.
@@ -259,16 +297,16 @@ void CreateTimeString (const struct timeval *ts, char *str, size_t size)
  * Or "01/01/2013-15:42:21.123456", which is 26, so round up to 32. */
 #define MAX_LOCAL_TIME_STRING 32
 
-static __thread int mru_time_slot; /* Most recently used cached value */
-static __thread time_t last_local_time[2];
-static __thread short int cached_local_time_len[2];
-static __thread char cached_local_time[2][MAX_LOCAL_TIME_STRING];
+static thread_local int mru_time_slot; /* Most recently used cached value */
+static thread_local time_t last_local_time[2];
+static thread_local short int cached_local_time_len[2];
+static thread_local char cached_local_time[2][MAX_LOCAL_TIME_STRING];
 
 /* Per-thread values for caching SCLocalTime() These cached values are
  * independent from the CreateTimeString cached values. */
-static __thread int mru_tm_slot; /* Most recently used local tm */
-static __thread time_t cached_minute_start[2];
-static __thread struct tm cached_local_tm[2];
+static thread_local int mru_tm_slot; /* Most recently used local tm */
+static thread_local time_t cached_minute_start[2];
+static thread_local struct tm cached_local_tm[2];
 
 /** \brief Convert time_t into Year, month, day, hour and minutes.
  * \param timep Time in seconds since defined date.

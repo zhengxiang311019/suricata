@@ -17,9 +17,9 @@
 
 use std::os::raw::c_int;
 
-use lua::*;
-use dns::dns::*;
-use dns::log::*;
+use crate::lua::*;
+use crate::dns::dns::*;
+use crate::dns::log::*;
 
 #[no_mangle]
 pub extern "C" fn rs_dns_lua_get_tx_id(clua: &mut CLuaState,
@@ -41,18 +41,34 @@ pub extern "C" fn rs_dns_lua_get_rrname(clua: &mut CLuaState,
         lua: clua,
     };
 
-    for request in &tx.request {
+    if let &Some(ref request) = &tx.request {
         for query in &request.queries {
+            lua.pushstring(&String::from_utf8_lossy(&query.name));
+            return 1;
+        }
+    } else if let &Some(ref response) = &tx.response {
+        for query in &response.queries {
             lua.pushstring(&String::from_utf8_lossy(&query.name));
             return 1;
         }
     }
 
-    for response in &tx.response {
-        for query in &response.queries {
-            lua.pushstring(&String::from_utf8_lossy(&query.name));
-            return 1;
-        }
+    return 0;
+}
+
+#[no_mangle]
+pub extern "C" fn rs_dns_lua_get_rcode(clua: &mut CLuaState,
+                                       tx: &mut DNSTransaction)
+                                       -> c_int
+{
+    let lua = LuaState{
+        lua: clua,
+    };
+
+    let rcode = tx.rcode();
+    if rcode > 0 {
+        lua.pushstring(&dns_rcode_string(rcode));
+        return 1;
     }
 
     return 0;
@@ -69,14 +85,13 @@ pub extern "C" fn rs_dns_lua_get_query_table(clua: &mut CLuaState,
 
     let mut i: i64 = 0;
 
-    for request in &tx.request {
+    // Create table now to be consistent with C that always returns
+    // table even in the absence of any authorities.
+    lua.newtable();
 
-        if request.queries.len() == 0 {
-            break;
-        }
-
-        lua.newtable();
-
+    // We first look in the request for queries. However, if there is
+    // no request, check the response for queries.
+    if let &Some(ref request) = &tx.request {
         for query in &request.queries {
             lua.pushinteger(i);
             i += 1;
@@ -93,11 +108,28 @@ pub extern "C" fn rs_dns_lua_get_query_table(clua: &mut CLuaState,
 
             lua.settable(-3);
         }
+    } else if let &Some(ref response) = &tx.response {
+        for query in &response.queries {
+            lua.pushinteger(i);
+            i += 1;
 
-        return 1;
+            lua.newtable();
+
+            lua.pushstring("type");
+            lua.pushstring(&dns_rrtype_string(query.rrtype));
+            lua.settable(-3);
+
+            lua.pushstring("rrname");
+            lua.pushstring(&String::from_utf8_lossy(&query.name));
+            lua.settable(-3);
+
+            lua.settable(-3);
+        }
     }
 
-    return 0;
+    // Again, always return 1 to be consistent with C, even if the
+    // table is empty.
+    return 1;
 }
 
 #[no_mangle]
@@ -111,14 +143,11 @@ pub extern "C" fn rs_dns_lua_get_answer_table(clua: &mut CLuaState,
 
     let mut i: i64 = 0;
 
-    for response in &tx.response {
+    // Create table now to be consistent with C that always returns
+    // table even in the absence of any authorities.
+    lua.newtable();
 
-        if response.answers.len() == 0 {
-            break;
-        }
-
-        lua.newtable();
-
+    if let &Some(ref response) = &tx.response {
         for answer in &response.answers {
             lua.pushinteger(i);
             i += 1;
@@ -136,25 +165,53 @@ pub extern "C" fn rs_dns_lua_get_answer_table(clua: &mut CLuaState,
             lua.pushstring(&String::from_utf8_lossy(&answer.name));
             lua.settable(-3);
 
-            if answer.data.len() > 0 {
-                lua.pushstring("addr");
-                match answer.rrtype {
-                    DNS_RECORD_TYPE_A | DNS_RECORD_TYPE_AAAA => {
-                        lua.pushstring(&dns_print_addr(&answer.data));
+            // All rdata types are pushed to "addr" for backwards compatibility
+            match answer.data {
+                DNSRData::A(ref bytes) | DNSRData::AAAA(ref bytes) => {
+                    if bytes.len() > 0 {
+                        lua.pushstring("addr");
+                        lua.pushstring(&dns_print_addr(&bytes));
+                        lua.settable(-3);
                     }
-                    _ => {
-                        lua.pushstring(&String::from_utf8_lossy(&answer.data));
+                },
+                DNSRData::CNAME(ref bytes) |
+                DNSRData::MX(ref bytes) |
+                DNSRData::NS(ref bytes) |
+                DNSRData::TXT(ref bytes) |
+                DNSRData::NULL(ref bytes) |
+                DNSRData::PTR(ref bytes) |
+                DNSRData::Unknown(ref bytes) => {
+                    if bytes.len() > 0 {
+                        lua.pushstring("addr");
+                        lua.pushstring(&String::from_utf8_lossy(&bytes));
+                        lua.settable(-3);
                     }
-                }
-                lua.settable(-3);
+                },
+                DNSRData::SOA(ref soa) => {
+                    if soa.mname.len() > 0 {
+                        lua.pushstring("addr");
+                        lua.pushstring(&String::from_utf8_lossy(&soa.mname));
+                        lua.settable(-3);
+                    }
+                },
+                DNSRData::SSHFP(ref sshfp) => {
+                    lua.pushstring("addr");
+                    lua.pushstring(&String::from_utf8_lossy(&sshfp.fingerprint));
+                    lua.settable(-3);
+                },
+                DNSRData::SRV(ref srv) => {
+                    lua.pushstring("addr");
+                    lua.pushstring(&String::from_utf8_lossy(&srv.target));
+                    lua.settable(-3);
+                },
             }
             lua.settable(-3);
         }
-
-        return 1;
     }
 
-    return 0;
+    // Again, always return 1 to be consistent with C, even if the
+    // table is empty.
+    return 1;
 }
 
 #[no_mangle]
@@ -168,14 +225,11 @@ pub extern "C" fn rs_dns_lua_get_authority_table(clua: &mut CLuaState,
 
     let mut i: i64 = 0;
 
-    for response in &tx.response {
+    // Create table now to be consistent with C that always returns
+    // table even in the absence of any authorities.
+    lua.newtable();
 
-        if response.authorities.len() == 0 {
-            break;
-        }
-
-        lua.newtable();
-
+    if let &Some(ref response) = &tx.response {
         for answer in &response.authorities {
             lua.pushinteger(i);
             i += 1;
@@ -195,9 +249,9 @@ pub extern "C" fn rs_dns_lua_get_authority_table(clua: &mut CLuaState,
 
             lua.settable(-3);
         }
-
-        return 1;
     }
 
-    return 0;
+    // Again, always return 1 to be consistent with C, even if the
+    // table is empty.
+    return 1;
 }

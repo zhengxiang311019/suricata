@@ -26,11 +26,9 @@
 
 void JsonHttpLogRegister(void);
 
-#ifdef HAVE_LIBJANSSON
-json_t *JsonHttpAddMetadata(const Flow *f, uint64_t tx_id);
-void JsonHttpLogJSONBodyPrintable(json_t *js, Flow *f, uint64_t tx_id);
-void JsonHttpLogJSONBodyBase64(json_t *js, Flow *f, uint64_t tx_id);
-#endif /* HAVE_LIBJANSSON */
+bool EveHttpAddMetadata(const Flow *f, uint64_t tx_id, JsonBuilder *js);
+void EveHttpLogJSONBodyPrintable(JsonBuilder *js, Flow *f, uint64_t tx_id);
+void EveHttpLogJSONBodyBase64(JsonBuilder *js, Flow *f, uint64_t tx_id);
 
 #endif /* __OUTPUT_JSON_HTTP_H__ */
 

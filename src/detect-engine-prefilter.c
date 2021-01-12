@@ -183,6 +183,7 @@ void Prefilter(DetectEngineThreadCtx *det_ctx, const SigGroupHead *sgh,
         QuickSortSigIntId(det_ctx->pmq.rule_id_array, det_ctx->pmq.rule_id_array_cnt);
         PACKET_PROFILING_DETECT_END(p, PROF_DETECT_PF_SORT1);
     }
+    SCReturn;
 }
 
 int PrefilterAppendEngine(DetectEngineCtx *de_ctx, SigGroupHead *sgh,
@@ -346,7 +347,10 @@ void PrefilterCleanupRuleGroup(const DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 
 void PrefilterSetupRuleGroup(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    BUG_ON(PatternMatchPrepareGroup(de_ctx, sgh) != 0);
+    int r = PatternMatchPrepareGroup(de_ctx, sgh);
+    if (r != 0) {
+        FatalError(SC_ERR_INITIALIZATION, "failed to set up pattern matching");
+    }
 
     /* set up engines if needed - when prefilter is set to auto we run
      * all engines, otherwise only those that have been forced by the
@@ -606,20 +610,89 @@ static void PrefilterGenericMpmFree(void *ptr)
 
 int PrefilterGenericMpmRegister(DetectEngineCtx *de_ctx,
         SigGroupHead *sgh, MpmCtx *mpm_ctx,
-        const DetectMpmAppLayerRegistery *mpm_reg, int list_id)
+        const DetectBufferMpmRegistery *mpm_reg, int list_id)
 {
     SCEnter();
     PrefilterMpmCtx *pectx = SCCalloc(1, sizeof(*pectx));
     if (pectx == NULL)
         return -1;
     pectx->list_id = list_id;
-    pectx->GetData = mpm_reg->v2.GetData;
+    pectx->GetData = mpm_reg->app_v2.GetData;
     pectx->mpm_ctx = mpm_ctx;
-    pectx->transforms = &mpm_reg->v2.transforms;
+    pectx->transforms = &mpm_reg->transforms;
 
     int r = PrefilterAppendTxEngine(de_ctx, sgh, PrefilterMpm,
-        mpm_reg->v2.alproto, mpm_reg->v2.tx_min_progress,
+        mpm_reg->app_v2.alproto, mpm_reg->app_v2.tx_min_progress,
         pectx, PrefilterGenericMpmFree, mpm_reg->pname);
+    if (r != 0) {
+        SCFree(pectx);
+    }
+    return r;
+}
+
+/* generic mpm for pkt engines */
+
+typedef struct PrefilterMpmPktCtx {
+    int list_id;
+    InspectionBufferGetPktDataPtr GetData;
+    const MpmCtx *mpm_ctx;
+    const DetectEngineTransforms *transforms;
+} PrefilterMpmPktCtx;
+
+/** \brief Generic Mpm prefilter callback
+ *
+ *  \param det_ctx detection engine thread ctx
+ *  \param p packet to inspect
+ *  \param f flow to inspect
+ *  \param txv tx to inspect
+ *  \param pectx inspection context
+ */
+static void PrefilterMpmPkt(DetectEngineThreadCtx *det_ctx,
+        Packet *p, const void *pectx)
+{
+    SCEnter();
+
+    const PrefilterMpmPktCtx *ctx = (const PrefilterMpmPktCtx *)pectx;
+    const MpmCtx *mpm_ctx = ctx->mpm_ctx;
+    SCLogDebug("running on list %d", ctx->list_id);
+
+    InspectionBuffer *buffer = ctx->GetData(det_ctx, ctx->transforms,
+            p, ctx->list_id);
+    if (buffer == NULL)
+        return;
+
+    const uint32_t data_len = buffer->inspect_len;
+    const uint8_t *data = buffer->inspect;
+
+    SCLogDebug("mpm'ing buffer:");
+    //PrintRawDataFp(stdout, data, data_len);
+
+    if (data != NULL && data_len >= mpm_ctx->minlen) {
+        (void)mpm_table[mpm_ctx->mpm_type].Search(mpm_ctx,
+                &det_ctx->mtcu, &det_ctx->pmq, data, data_len);
+    }
+}
+
+static void PrefilterMpmPktFree(void *ptr)
+{
+    SCFree(ptr);
+}
+
+int PrefilterGenericMpmPktRegister(DetectEngineCtx *de_ctx,
+        SigGroupHead *sgh, MpmCtx *mpm_ctx,
+        const DetectBufferMpmRegistery *mpm_reg, int list_id)
+{
+    SCEnter();
+    PrefilterMpmPktCtx *pectx = SCCalloc(1, sizeof(*pectx));
+    if (pectx == NULL)
+        return -1;
+    pectx->list_id = list_id;
+    pectx->GetData = mpm_reg->pkt_v1.GetData;
+    pectx->mpm_ctx = mpm_ctx;
+    pectx->transforms = &mpm_reg->transforms;
+
+    int r = PrefilterAppendEngine(de_ctx, sgh, PrefilterMpmPkt,
+        pectx, PrefilterMpmPktFree, mpm_reg->pname);
     if (r != 0) {
         SCFree(pectx);
     }

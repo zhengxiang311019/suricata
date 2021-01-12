@@ -25,6 +25,13 @@
 #include "util-misc.h"
 #include "util-hash-lookup3.h"
 
+/** defrag tracker hash table */
+DefragTrackerHashRow *defragtracker_hash;
+DefragConfig defrag_config;
+SC_ATOMIC_DECLARE(uint64_t,defrag_memuse);
+SC_ATOMIC_DECLARE(unsigned int,defragtracker_counter);
+SC_ATOMIC_DECLARE(unsigned int,defragtracker_prune_idx);
+
 static DefragTracker *DefragTrackerGetUsedDefragTracker(void);
 
 /** queue with spare tracker */
@@ -149,7 +156,6 @@ void DefragTrackerRelease(DefragTracker *t)
 void DefragTrackerClearMemory(DefragTracker *dt)
 {
     DefragTrackerFreeFrags(dt);
-    SC_ATOMIC_DESTROY(dt->use_cnt);
 }
 
 #define DEFRAG_DEFAULT_HASHSIZE 4096
@@ -195,7 +201,7 @@ void DefragInitConfig(char quiet)
     }
     if ((ConfGet("defrag.hash-size", &conf_val)) == 1)
     {
-        if (ByteExtractStringUint32(&configval, 10, strlen(conf_val),
+        if (StringParseUint32(&configval, 10, strlen(conf_val),
                                     conf_val) > 0) {
             defrag_config.hash_size = configval;
         } else {
@@ -206,7 +212,7 @@ void DefragInitConfig(char quiet)
 
     if ((ConfGet("defrag.trackers", &conf_val)) == 1)
     {
-        if (ByteExtractStringUint32(&configval, 10, strlen(conf_val),
+        if (StringParseUint32(&configval, 10, strlen(conf_val),
                                     conf_val) > 0) {
             defrag_config.prealloc = configval;
         } else {
@@ -230,8 +236,8 @@ void DefragInitConfig(char quiet)
     }
     defragtracker_hash = SCCalloc(defrag_config.hash_size, sizeof(DefragTrackerHashRow));
     if (unlikely(defragtracker_hash == NULL)) {
-        SCLogError(SC_ERR_FATAL, "Fatal error encountered in DefragTrackerInitConfig. Exiting...");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL,
+                   "Fatal error encountered in DefragTrackerInitConfig. Exiting...");
     }
     memset(defragtracker_hash, 0, defrag_config.hash_size * sizeof(DefragTrackerHashRow));
 
@@ -322,12 +328,6 @@ void DefragHashShutdown(void)
     }
     (void) SC_ATOMIC_SUB(defrag_memuse, defrag_config.hash_size * sizeof(DefragTrackerHashRow));
     DefragTrackerQueueDestroy(&defragtracker_spare_q);
-
-    SC_ATOMIC_DESTROY(defragtracker_prune_idx);
-    SC_ATOMIC_DESTROY(defrag_memuse);
-    SC_ATOMIC_DESTROY(defragtracker_counter);
-    SC_ATOMIC_DESTROY(defrag_config.memcap);
-    //SC_ATOMIC_DESTROY(flow_flags);
     return;
 }
 

@@ -1,4 +1,4 @@
-/* Copyright (C) 2015 Open Information Security Foundation
+/* Copyright (C) 2015-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -53,16 +53,14 @@
 #include "app-layer-template.h"
 #include "output-json-template.h"
 
-#ifdef HAVE_LIBJANSSON
-
 typedef struct LogTemplateFileCtx_ {
     LogFileCtx *file_ctx;
     uint32_t    flags;
 } LogTemplateFileCtx;
 
 typedef struct LogTemplateLogThread_ {
+    LogFileCtx *file_ctx;
     LogTemplateFileCtx *templatelog_ctx;
-    uint32_t            count;
     MemBuffer          *buffer;
 } LogTemplateLogThread;
 
@@ -74,44 +72,33 @@ static int JsonTemplateLogger(ThreadVars *tv, void *thread_data,
 
     SCLogNotice("Logging template transaction %"PRIu64".", templatetx->tx_id);
 
-    json_t *js = CreateJSONHeader(p, LOG_DIR_PACKET, "template");
+    JsonBuilder *js = CreateEveHeader(p, LOG_DIR_PACKET, "template", NULL);
     if (unlikely(js == NULL)) {
         return TM_ECODE_FAILED;
     }
 
-    json_t *templatejs = json_object();
-    if (unlikely(templatejs == NULL)) {
-        goto error;
+    jb_open_object(js, "template");
+
+    /* Log the request buffer. */
+    if (templatetx->request_buffer != NULL) {
+        jb_set_string_from_bytes(js, "request", templatetx->request_buffer,
+                templatetx->request_buffer_len);
     }
 
-    /* Convert the request buffer to a string then log. */
-    char *request_buffer = BytesToString(templatetx->request_buffer,
-        templatetx->request_buffer_len);
-    if (request_buffer != NULL) {
-        json_object_set_new(templatejs, "request", json_string(request_buffer));
-        SCFree(request_buffer);
+    /* Log the response buffer. */
+    if (templatetx->response_buffer != NULL) {
+        jb_set_string_from_bytes(js, "response", templatetx->response_buffer,
+                templatetx->response_buffer_len);
     }
 
-    /* Convert the response buffer to a string then log. */
-    char *response_buffer = BytesToString(templatetx->response_buffer,
-        templatetx->response_buffer_len);
-    if (response_buffer != NULL) {
-        json_object_set_new(templatejs, "response",
-            json_string(response_buffer));
-        SCFree(response_buffer);
-    }
-
-    json_object_set_new(js, "template", templatejs);
+    /* Close template. */
+    jb_close(js);
 
     MemBufferReset(thread->buffer);
-    OutputJSONBuffer(js, thread->templatelog_ctx->file_ctx, &thread->buffer);
+    OutputJsonBuilderBuffer(js, thread->file_ctx, &thread->buffer);
 
-    json_decref(js);
+    jb_free(js);
     return TM_ECODE_OK;
-    
-error:
-    json_decref(js);
-    return TM_ECODE_FAILED;
 }
 
 static void OutputTemplateLogDeInitCtxSub(OutputCtx *output_ctx)
@@ -150,8 +137,6 @@ static OutputInitResult OutputTemplateLogInitSub(ConfNode *conf,
     return result;
 }
 
-#define OUTPUT_BUFFER_SIZE 65535
-
 static TmEcode JsonTemplateLogThreadInit(ThreadVars *t, const void *initdata, void **data)
 {
     LogTemplateLogThread *thread = SCCalloc(1, sizeof(*thread));
@@ -161,20 +146,29 @@ static TmEcode JsonTemplateLogThreadInit(ThreadVars *t, const void *initdata, vo
 
     if (initdata == NULL) {
         SCLogDebug("Error getting context for EveLogTemplate.  \"initdata\" is NULL.");
-        SCFree(thread);
-        return TM_ECODE_FAILED;
+        goto error_exit;
     }
 
-    thread->buffer = MemBufferCreateNew(OUTPUT_BUFFER_SIZE);
+    thread->buffer = MemBufferCreateNew(JSON_OUTPUT_BUFFER_SIZE);
     if (unlikely(thread->buffer == NULL)) {
-        SCFree(thread);
-        return TM_ECODE_FAILED;
+        goto error_exit;
     }
 
     thread->templatelog_ctx = ((OutputCtx *)initdata)->data;
+    thread->file_ctx = LogFileEnsureExists(thread->templatelog_ctx->file_ctx, t->id);
+    if (!thread->file_ctx) {
+        goto error_exit;
+    }
     *data = (void *)thread;
 
     return TM_ECODE_OK;
+
+error_exit:
+    if (thread->buffer != NULL) {
+        MemBufferFree(thread->buffer);
+    }
+    SCFree(thread);
+    return TM_ECODE_FAILED;
 }
 
 static TmEcode JsonTemplateLogThreadDeinit(ThreadVars *t, void *data)
@@ -205,11 +199,3 @@ void JsonTemplateLogRegister(void)
 
     SCLogNotice("Template JSON logger registered.");
 }
-
-#else /* No JSON support. */
-
-void JsonTemplateLogRegister(void)
-{
-}
-
-#endif /* HAVE_LIBJANSSON */

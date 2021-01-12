@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -28,7 +28,9 @@
 #define COUNTERS
 
 #include "suricata-common.h"
+#include "suricata-plugin.h"
 #include "threadvars.h"
+#include "util-debug.h"
 #include "decode-events.h"
 #include "flow-worker.h"
 
@@ -52,9 +54,12 @@ enum PktSrcEnum {
     PKT_SRC_DECODER_IPV6,
     PKT_SRC_DECODER_TEREDO,
     PKT_SRC_DEFRAG,
-    PKT_SRC_STREAM_TCP_STREAM_END_PSEUDO,
     PKT_SRC_FFR,
     PKT_SRC_STREAM_TCP_DETECTLOG_FLUSH,
+    PKT_SRC_DECODER_VXLAN,
+    PKT_SRC_DETECT_RELOAD_FLUSH,
+    PKT_SRC_CAPTURE_TIMEOUT,
+    PKT_SRC_DECODER_GENEVE,
 };
 
 #include "source-nflog.h"
@@ -62,7 +67,6 @@ enum PktSrcEnum {
 #include "source-ipfw.h"
 #include "source-pcap.h"
 #include "source-af-packet.h"
-#include "source-mpipe.h"
 #include "source-netmap.h"
 #include "source-windivert.h"
 #ifdef HAVE_PF_RING_FLOW_OFFLOAD
@@ -73,7 +77,9 @@ enum PktSrcEnum {
 
 #include "decode-erspan.h"
 #include "decode-ethernet.h"
+#include "decode-chdlc.h"
 #include "decode-gre.h"
+#include "decode-geneve.h"
 #include "decode-ppp.h"
 #include "decode-pppoe.h"
 #include "decode-sll.h"
@@ -87,7 +93,9 @@ enum PktSrcEnum {
 #include "decode-raw.h"
 #include "decode-null.h"
 #include "decode-vlan.h"
+#include "decode-vxlan.h"
 #include "decode-mpls.h"
+#include "decode-nsh.h"
 
 #include "detect-reference.h"
 
@@ -159,7 +167,7 @@ typedef struct Address_ {
         (a)->addr_data32[3] = 0; \
     } while (0)
 
-/* Set the IPv6 addressesinto the Addrs of the Packet.
+/* Set the IPv6 addresses into the Addrs of the Packet.
  * Make sure p->ip6h is initialized and validated. */
 #define SET_IPV6_SRC_ADDR(p, a) do {                    \
         (a)->family = AF_INET6;                         \
@@ -384,7 +392,7 @@ typedef struct PktProfiling_ {
 
 #endif /* PROFILING */
 
-/* forward declartion since Packet struct definition requires this */
+/* forward declaration since Packet struct definition requires this */
 struct PacketQueue_;
 
 /* sizes of the members:
@@ -463,10 +471,6 @@ typedef struct Packet_
 #ifdef AF_PACKET
         AFPPacketVars afp_v;
 #endif
-#ifdef HAVE_MPIPE
-        /* tilegx mpipe stuff */
-        MpipePacketVars mpipe_v;
-#endif
 #ifdef HAVE_NETMAP
         NetmapPacketVars netmap_v;
 #endif
@@ -478,6 +482,9 @@ typedef struct Packet_
 #ifdef WINDIVERT
         WinDivertPacketVars windivert_v;
 #endif /* WINDIVERT */
+
+        /* A chunk of memory that a plugin can use for its packet vars. */
+        uint8_t plugin_v[PLUGIN_VAR_SIZE];
 
         /** libpcap vars: shared by Pcap Live mode and Pcap File mode */
         PcapPacketVars pcap_v;
@@ -537,8 +544,6 @@ typedef struct Packet_
     PPPOEDiscoveryHdr *pppoedh;
 
     GREHdr *greh;
-
-    VLANHdr *vlanh[2];
 
     /* ptr to the payload of the packet
      * with it's length. */
@@ -609,12 +614,7 @@ typedef struct Packet_
 #ifdef HAVE_NAPATECH
     NapatechPacketVars ntpv;
 #endif
-}
-#ifdef HAVE_MPIPE
-    /* mPIPE requires packet buffers to be aligned to 128 byte boundaries. */
-    __attribute__((aligned(128)))
-#endif
-Packet;
+} Packet;
 
 /** highest mtu of the interfaces we monitor */
 extern int g_default_mtu;
@@ -624,19 +624,8 @@ extern int g_default_mtu;
 #define DEFAULT_PACKET_SIZE (DEFAULT_MTU + ETHERNET_HEADER_LEN)
 /* storage: maximum ip packet size + link header */
 #define MAX_PAYLOAD_SIZE (IPV6_HEADER_LEN + 65536 + 28)
-uint32_t default_packet_size;
+extern uint32_t default_packet_size;
 #define SIZE_OF_PACKET (default_packet_size + sizeof(Packet))
-
-typedef struct PacketQueue_ {
-    Packet *top;
-    Packet *bot;
-    uint32_t len;
-#ifdef DBG_PERF
-    uint32_t dbg_maxlen;
-#endif /* DBG_PERF */
-    SCMutex mutex_q;
-    SCCondT cond_q;
-} PacketQueue;
 
 /** \brief Structure to hold thread specific data for all decode modules */
 typedef struct DecodeThreadVars_
@@ -644,17 +633,18 @@ typedef struct DecodeThreadVars_
     /** Specific context for udp protocol detection (here atm) */
     AppLayerThreadCtx *app_tctx;
 
-    int vlan_disabled;
-
     /** stats/counters */
     uint16_t counter_pkts;
     uint16_t counter_bytes;
     uint16_t counter_avg_pkt_size;
     uint16_t counter_max_pkt_size;
+    uint16_t counter_max_mac_addrs_src;
+    uint16_t counter_max_mac_addrs_dst;
 
     uint16_t counter_invalid;
 
     uint16_t counter_eth;
+    uint16_t counter_chdlc;
     uint16_t counter_ipv4;
     uint16_t counter_ipv6;
     uint16_t counter_tcp;
@@ -667,9 +657,11 @@ typedef struct DecodeThreadVars_
     uint16_t counter_null;
     uint16_t counter_sctp;
     uint16_t counter_ppp;
+    uint16_t counter_geneve;
     uint16_t counter_gre;
     uint16_t counter_vlan;
     uint16_t counter_vlan_qinq;
+    uint16_t counter_vxlan;
     uint16_t counter_ieee8021ah;
     uint16_t counter_pppoe;
     uint16_t counter_teredo;
@@ -677,6 +669,7 @@ typedef struct DecodeThreadVars_
     uint16_t counter_ipv4inipv6;
     uint16_t counter_ipv6inipv6;
     uint16_t counter_erspan;
+    uint16_t counter_nsh;
 
     /** frag stats - defrag runs in the context of the decoder. */
     uint16_t counter_defrag_ipv4_fragments;
@@ -693,6 +686,17 @@ typedef struct DecodeThreadVars_
     uint16_t counter_flow_udp;
     uint16_t counter_flow_icmp4;
     uint16_t counter_flow_icmp6;
+    uint16_t counter_flow_tcp_reuse;
+    uint16_t counter_flow_get_used;
+    uint16_t counter_flow_get_used_eval;
+    uint16_t counter_flow_get_used_eval_reject;
+    uint16_t counter_flow_get_used_eval_busy;
+    uint16_t counter_flow_get_used_failed;
+
+    uint16_t counter_flow_spare_sync;
+    uint16_t counter_flow_spare_sync_empty;
+    uint16_t counter_flow_spare_sync_incomplete;
+    uint16_t counter_flow_spare_sync_avg;
 
     uint16_t counter_engine_events[DECODE_EVENT_MAX];
 
@@ -802,8 +806,6 @@ void CaptureStatsSetup(ThreadVars *tv, CaptureStats *s);
         (p)->pppoesh = NULL;                    \
         (p)->pppoedh = NULL;                    \
         (p)->greh = NULL;                       \
-        (p)->vlanh[0] = NULL;                   \
-        (p)->vlanh[1] = NULL;                   \
         (p)->payload = NULL;                    \
         (p)->payload_len = 0;                   \
         (p)->BypassPacketsFlow = NULL;          \
@@ -901,16 +903,20 @@ void CaptureStatsSetup(ThreadVars *tv, CaptureStats *s);
 
 enum DecodeTunnelProto {
     DECODE_TUNNEL_ETHERNET,
-    DECODE_TUNNEL_ERSPAN,
+    DECODE_TUNNEL_ERSPANII,
+    DECODE_TUNNEL_ERSPANI,
     DECODE_TUNNEL_VLAN,
     DECODE_TUNNEL_IPV4,
     DECODE_TUNNEL_IPV6,
+    DECODE_TUNNEL_IPV6_TEREDO, /**< separate protocol for stricter error handling */
     DECODE_TUNNEL_PPP,
+    DECODE_TUNNEL_NSH,
+    DECODE_TUNNEL_UNSET
 };
 
 Packet *PacketTunnelPktSetup(ThreadVars *tv, DecodeThreadVars *dtv, Packet *parent,
-                             uint8_t *pkt, uint32_t len, enum DecodeTunnelProto proto, PacketQueue *pq);
-Packet *PacketDefragPktSetup(Packet *parent, uint8_t *pkt, uint32_t len, uint8_t proto);
+                             const uint8_t *pkt, uint32_t len, enum DecodeTunnelProto proto);
+Packet *PacketDefragPktSetup(Packet *parent, const uint8_t *pkt, uint32_t len, uint8_t proto);
 void PacketDefragPktSetupParent(Packet *parent);
 void DecodeRegisterPerfCounters(DecodeThreadVars *, ThreadVars *);
 Packet *PacketGetFromQueueOrAlloc(void);
@@ -921,11 +927,12 @@ void PacketUpdateEngineEventCounters(ThreadVars *tv,
 void PacketFree(Packet *p);
 void PacketFreeOrRelease(Packet *p);
 int PacketCallocExtPkt(Packet *p, int datalen);
-int PacketCopyData(Packet *p, uint8_t *pktdata, uint32_t pktlen);
-int PacketSetData(Packet *p, uint8_t *pktdata, uint32_t pktlen);
-int PacketCopyDataOffset(Packet *p, uint32_t offset, uint8_t *data, uint32_t datalen);
+int PacketCopyData(Packet *p, const uint8_t *pktdata, uint32_t pktlen);
+int PacketSetData(Packet *p, const uint8_t *pktdata, uint32_t pktlen);
+int PacketCopyDataOffset(Packet *p, uint32_t offset, const uint8_t *data, uint32_t datalen);
 const char *PktSrcToString(enum PktSrcEnum pkt_src);
 void PacketBypassCallback(Packet *p);
+void PacketSwap(Packet *p);
 
 DecodeThreadVars *DecodeThreadVarsAlloc(ThreadVars *);
 void DecodeThreadVarsFree(ThreadVars *, DecodeThreadVars *);
@@ -933,43 +940,45 @@ void DecodeUpdatePacketCounters(ThreadVars *tv,
                                 const DecodeThreadVars *dtv, const Packet *p);
 
 /* decoder functions */
-int DecodeEthernet(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
-int DecodeSll(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
-int DecodePPP(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
-int DecodePPPOESession(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
-int DecodePPPOEDiscovery(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
-int DecodeTunnel(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *, enum DecodeTunnelProto) __attribute__ ((warn_unused_result));
-int DecodeNull(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
-int DecodeRaw(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
-int DecodeIPV4(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint16_t, PacketQueue *);
-int DecodeIPV6(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint16_t, PacketQueue *);
-int DecodeICMPV4(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
-int DecodeICMPV6(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
-int DecodeTCP(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint16_t, PacketQueue *);
-int DecodeUDP(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint16_t, PacketQueue *);
-int DecodeSCTP(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint16_t, PacketQueue *);
-int DecodeGRE(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
-int DecodeVLAN(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
-int DecodeMPLS(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
-int DecodeERSPAN(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
-int DecodeTEMPLATE(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t, PacketQueue *);
+int DecodeEthernet(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeSll(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodePPP(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodePPPOESession(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodePPPOEDiscovery(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeTunnel(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t, enum DecodeTunnelProto) WARN_UNUSED;
+int DecodeNull(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeRaw(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeIPV4(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint16_t);
+int DecodeIPV6(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint16_t);
+int DecodeICMPV4(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeICMPV6(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeTCP(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint16_t);
+int DecodeUDP(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint16_t);
+int DecodeSCTP(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint16_t);
+int DecodeGRE(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeVLAN(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeIEEE8021ah(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeGeneve(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeVXLAN(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeMPLS(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeERSPAN(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeERSPANTypeI(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeCHDLC(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeTEMPLATE(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeNSH(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 
 #ifdef UNITTESTS
-void DecodeIPV6FragHeader(Packet *p, uint8_t *pkt,
+void DecodeIPV6FragHeader(Packet *p, const uint8_t *pkt,
                           uint16_t hdrextlen, uint16_t plen,
                           uint16_t prev_hdrextlen);
 #endif
 
 void AddressDebugPrint(Address *);
 
-#ifdef AFLFUZZ_DECODER
 typedef int (*DecoderFunc)(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
-         uint8_t *pkt, uint32_t len, PacketQueue *pq);
-
-int DecoderParseDataFromFile(char *filename, DecoderFunc Decoder);
-int DecoderParseDataFromFileSerie(char *fileprefix, DecoderFunc Decoder);
-#endif
+         const uint8_t *pkt, uint32_t len);
 void DecodeGlobalConfig(void);
+void DecodeUnregisterCounters(void);
 
 /** \brief Set the No payload inspection Flag for the packet.
  *
@@ -1060,6 +1069,10 @@ void DecodeGlobalConfig(void);
 #define DLT_EN10MB 1
 #endif
 
+#ifndef DLT_C_HDLC
+#define DLT_C_HDLC 104
+#endif
+
 /* taken from pcap's bpf.h */
 #ifndef DLT_RAW
 #ifdef __OpenBSD__
@@ -1085,6 +1098,7 @@ void DecodeGlobalConfig(void);
 #define LINKTYPE_RAW2        101
 #define LINKTYPE_IPV4        228
 #define LINKTYPE_GRE_OVER_IP 778
+#define LINKTYPE_CISCO_HDLC  DLT_C_HDLC
 #define PPP_OVER_GRE         11
 #define VLAN_OVER_GRE        13
 
@@ -1094,7 +1108,7 @@ void DecodeGlobalConfig(void);
 #define PKT_ALLOC                       (1<<3)      /**< Packet was alloc'd this run, needs to be freed */
 #define PKT_HAS_TAG                     (1<<4)      /**< Packet has matched a tag */
 #define PKT_STREAM_ADD                  (1<<5)      /**< Packet payload was added to reassembled stream */
-#define PKT_STREAM_EST                  (1<<6)      /**< Packet is part of establised stream */
+#define PKT_STREAM_EST                  (1<<6)      /**< Packet is part of established stream */
 #define PKT_STREAM_EOF                  (1<<7)      /**< Stream is in eof state */
 #define PKT_HAS_FLOW                    (1<<8)
 #define PKT_PSEUDO_STREAM_END           (1<<9)      /**< Pseudo packet to end the stream */
@@ -1129,6 +1143,9 @@ void DecodeGlobalConfig(void);
 
 #define PKT_PSEUDO_DETECTLOG_FLUSH      (1<<27)     /**< Detect/log flush for protocol upgrade */
 
+/** Packet is part of stream in known bad condition (loss, wrong thread),
+ *  so flag it for not setting stream events */
+#define PKT_STREAM_NO_EVENTS            (1<<28)
 
 /** \brief return 1 if the packet is a pseudo packet */
 #define PKT_IS_PSEUDOPKT(p) \
@@ -1168,5 +1185,92 @@ static inline bool VerdictTunnelPacket(Packet *p)
     return verdict;
 }
 
-#endif /* __DECODE_H__ */
+static inline void DecodeLinkLayer(ThreadVars *tv, DecodeThreadVars *dtv,
+        const int datalink, Packet *p, const uint8_t *data, const uint32_t len)
+{
+    /* call the decoder */
+    switch (datalink) {
+        case LINKTYPE_ETHERNET:
+            DecodeEthernet(tv, dtv, p, data, len);
+            break;
+        case LINKTYPE_LINUX_SLL:
+            DecodeSll(tv, dtv, p, data, len);
+            break;
+        case LINKTYPE_PPP:
+            DecodePPP(tv, dtv, p, data, len);
+            break;
+        case LINKTYPE_RAW:
+        case LINKTYPE_GRE_OVER_IP:
+            DecodeRaw(tv, dtv, p, data, len);
+            break;
+        case LINKTYPE_NULL:
+            DecodeNull(tv, dtv, p, data, len);
+            break;
+       case LINKTYPE_CISCO_HDLC:
+            DecodeCHDLC(tv, dtv, p, data, len);
+            break;
+        default:
+            SCLogError(SC_ERR_DATALINK_UNIMPLEMENTED, "datalink type "
+                    "%"PRId32" not yet supported", datalink);
+            break;
+    }
+}
 
+/** \brief decode network layer
+ *  \retval bool true if successful, false if unknown */
+static inline bool DecodeNetworkLayer(ThreadVars *tv, DecodeThreadVars *dtv,
+        const uint16_t proto, Packet *p, const uint8_t *data, const uint32_t len)
+{
+    switch (proto) {
+        case ETHERNET_TYPE_IP: {
+            uint16_t ip_len = (len < USHRT_MAX) ? (uint16_t)len : (uint16_t)USHRT_MAX;
+            DecodeIPV4(tv, dtv, p, data, ip_len);
+            break;
+        }
+        case ETHERNET_TYPE_IPV6: {
+            uint16_t ip_len = (len < USHRT_MAX) ? (uint16_t)len : (uint16_t)USHRT_MAX;
+            DecodeIPV6(tv, dtv, p, data, ip_len);
+            break;
+        }
+        case ETHERNET_TYPE_PPPOE_SESS:
+            DecodePPPOESession(tv, dtv, p, data, len);
+            break;
+        case ETHERNET_TYPE_PPPOE_DISC:
+            DecodePPPOEDiscovery(tv, dtv, p, data, len);
+            break;
+        case ETHERNET_TYPE_VLAN:
+        case ETHERNET_TYPE_8021AD:
+        case ETHERNET_TYPE_8021QINQ:
+            if (p->vlan_idx >= 2) {
+                ENGINE_SET_EVENT(p,VLAN_HEADER_TOO_MANY_LAYERS);
+            } else {
+                DecodeVLAN(tv, dtv, p, data, len);
+            }
+            break;
+        case ETHERNET_TYPE_8021AH:
+            DecodeIEEE8021ah(tv, dtv, p, data, len);
+            break;
+        case ETHERNET_TYPE_ARP:
+            break;
+        case ETHERNET_TYPE_MPLS_UNICAST:
+        case ETHERNET_TYPE_MPLS_MULTICAST:
+            DecodeMPLS(tv, dtv, p, data, len);
+            break;
+        case ETHERNET_TYPE_DCE:
+            if (unlikely(len < ETHERNET_DCE_HEADER_LEN)) {
+                ENGINE_SET_INVALID_EVENT(p, DCE_PKT_TOO_SMALL);
+            } else {
+                DecodeEthernet(tv, dtv, p, data, len);
+            }
+            break;
+        case ETHERNET_TYPE_NSH:
+            DecodeNSH(tv, dtv, p, data, len);
+            break;
+        default:
+            SCLogDebug("unknown ether type: %" PRIx16 "", proto);
+            return false;
+    }
+    return true;
+}
+
+#endif /* __DECODE_H__ */

@@ -89,7 +89,7 @@ RB_PROTOTYPE(TCPSEG, TcpSegment, rb, TcpSegmentCompare);
 #define STREAM_SEQ_RIGHT_EDGE(stream)   (stream)->segs_right_edge
 #define STREAM_RIGHT_EDGE(stream)       (STREAM_BASE_OFFSET((stream)) + (STREAM_SEQ_RIGHT_EDGE((stream)) - (stream)->base_seq))
 /* return true if we have seen data segments. */
-#define STREAM_HAS_SEEN_DATA(stream)    (!RB_EMPTY(&(stream)->sb.sbb_tree) || (stream)->sb.stream_offset)
+#define STREAM_HAS_SEEN_DATA(stream)    (!RB_EMPTY(&(stream)->sb.sbb_tree) || (stream)->sb.stream_offset || (stream)->sb.buf_offset)
 
 typedef struct TcpStream_ {
     uint16_t flags:12;              /**< Flag specific to the stream e.g. Timestamp */
@@ -117,6 +117,7 @@ typedef struct TcpStream_ {
 
     uint32_t min_inspect_depth;     /**< min inspect size set by the app layer, to make sure enough data
                                      *   remains available for inspection together with app layer buffers */
+    uint32_t data_required;         /**< data required from STREAM_APP_PROGRESS before calling app-layer again */
 
     StreamingBuffer sb;
     struct TCPSEG seg_tree;         /**< red black tree of TCP segments. Data is stored in TcpStream::sb */
@@ -133,7 +134,7 @@ typedef struct TcpStream_ {
 #define STREAM_LOG_PROGRESS(stream) (STREAM_BASE_OFFSET((stream)) + (stream)->log_progress_rel)
 
 /* from /usr/include/netinet/tcp.h */
-enum
+enum TcpState
 {
     TCP_NONE,
     TCP_LISTEN,
@@ -163,7 +164,8 @@ enum
 #define STREAMTCP_FLAG_TIMESTAMP                    0x0008
 /** Server supports wscale (even though it can be 0) */
 #define STREAMTCP_FLAG_SERVER_WSCALE                0x0010
-// vacancy
+/** Closed by RST */
+#define STREAMTCP_FLAG_CLOSED_BY_RST                0x0020
 /** Flag to indicate that the session is handling asynchronous stream.*/
 #define STREAMTCP_FLAG_ASYNC                        0x0040
 /** Flag to indicate we're dealing with 4WHS: SYN, SYN, SYN/ACK, ACK
@@ -186,36 +188,37 @@ enum
 #define STREAMTCP_FLAG_APP_LAYER_DISABLED           0x2000
 /** Stream can be bypass */
 #define STREAMTCP_FLAG_BYPASS                       0x4000
+/** SSN uses TCP Fast Open */
+#define STREAMTCP_FLAG_TCP_FAST_OPEN                0x8000
 
 /*
  * Per STREAM flags
  */
 
-/** stream is in a gap state */
-#define STREAMTCP_STREAM_FLAG_GAP               0x0001
+// bit 0 vacant
 /** Flag to avoid stream reassembly/app layer inspection for the stream */
-#define STREAMTCP_STREAM_FLAG_NOREASSEMBLY      0x0002
+#define STREAMTCP_STREAM_FLAG_NOREASSEMBLY                  BIT_U16(1)
 /** we received a keep alive */
-#define STREAMTCP_STREAM_FLAG_KEEPALIVE         0x0004
+#define STREAMTCP_STREAM_FLAG_KEEPALIVE                     BIT_U16(2)
 /** Stream has reached it's reassembly depth, all further packets are ignored */
-#define STREAMTCP_STREAM_FLAG_DEPTH_REACHED     0x0008
+#define STREAMTCP_STREAM_FLAG_DEPTH_REACHED                 BIT_U16(3)
 /** Trigger reassembly next time we need 'raw' */
-#define STREAMTCP_STREAM_FLAG_TRIGGER_RAW       0x0010
+#define STREAMTCP_STREAM_FLAG_TRIGGER_RAW                   BIT_U16(4)
 /** Stream supports TIMESTAMP -- used to set ssn STREAMTCP_FLAG_TIMESTAMP
  *  flag. */
-#define STREAMTCP_STREAM_FLAG_TIMESTAMP         0x0020
+#define STREAMTCP_STREAM_FLAG_TIMESTAMP                     BIT_U16(5)
 /** Flag to indicate the zero value of timestamp */
-#define STREAMTCP_STREAM_FLAG_ZERO_TIMESTAMP    0x0040
+#define STREAMTCP_STREAM_FLAG_ZERO_TIMESTAMP                BIT_U16(6)
 /** App proto detection completed */
-#define STREAMTCP_STREAM_FLAG_APPPROTO_DETECTION_COMPLETED 0x0080
+#define STREAMTCP_STREAM_FLAG_APPPROTO_DETECTION_COMPLETED  BIT_U16(7)
 /** App proto detection skipped */
-#define STREAMTCP_STREAM_FLAG_APPPROTO_DETECTION_SKIPPED 0x0100
+#define STREAMTCP_STREAM_FLAG_APPPROTO_DETECTION_SKIPPED    BIT_U16(8)
 /** Raw reassembly disabled for new segments */
-#define STREAMTCP_STREAM_FLAG_NEW_RAW_DISABLED 0x0200
+#define STREAMTCP_STREAM_FLAG_NEW_RAW_DISABLED              BIT_U16(9)
 /** Raw reassembly disabled completely */
-#define STREAMTCP_STREAM_FLAG_DISABLE_RAW 0x400
+#define STREAMTCP_STREAM_FLAG_DISABLE_RAW                   BIT_U16(10)
 
-#define STREAMTCP_STREAM_FLAG_RST_RECV  0x800
+#define STREAMTCP_STREAM_FLAG_RST_RECV                      BIT_U16(11)
 
 /** NOTE: flags field is 12 bits */
 
@@ -243,9 +246,15 @@ enum
     } while(0); \
 }
 
-#define StreamTcpSetEvent(p, e) { \
-    SCLogDebug("setting event %"PRIu8" on pkt %p (%"PRIu64")", (e), p, (p)->pcap_cnt); \
-    ENGINE_SET_EVENT((p), (e)); \
+#define StreamTcpSetEvent(p, e) {                                           \
+    if ((p)->flags & PKT_STREAM_NO_EVENTS) {                                \
+        SCLogDebug("not setting event %d on pkt %p (%"PRIu64"), "     \
+                   "stream in known bad condition", (e), p, (p)->pcap_cnt); \
+    } else {                                                                \
+        SCLogDebug("setting event %d on pkt %p (%"PRIu64")",          \
+                    (e), p, (p)->pcap_cnt);                                 \
+        ENGINE_SET_EVENT((p), (e));                                         \
+    }                                                                       \
 }
 
 typedef struct TcpSession_ {

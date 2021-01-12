@@ -180,19 +180,23 @@ static int DetectLoadSigFile(DetectEngineCtx *de_ctx, char *sig_file,
             SCLogDebug("signature %"PRIu32" loaded", sig->id);
             good++;
         } else {
-            SCLogError(SC_ERR_INVALID_SIGNATURE, "error parsing signature \"%s\" from "
-                 "file %s at line %"PRId32"", line, sig_file, lineno - multiline);
+            if (!de_ctx->sigerror_silent) {
+                SCLogError(SC_ERR_INVALID_SIGNATURE, "error parsing signature \"%s\" from "
+                        "file %s at line %"PRId32"", line, sig_file, lineno - multiline);
 
+                if (!SigStringAppend(&de_ctx->sig_stat, sig_file, line, de_ctx->sigerror, (lineno - multiline))) {
+                    SCLogError(SC_ERR_MEM_ALLOC, "Error adding sig \"%s\" from "
+                            "file %s at line %"PRId32"", line, sig_file, lineno - multiline);
+                }
+                if (de_ctx->sigerror) {
+                    de_ctx->sigerror = NULL;
+                }
+            }
             if (rule_engine_analysis_set) {
                 EngineAnalysisRulesFailure(line, sig_file, lineno - multiline);
             }
-            bad++;
-            if (!SigStringAppend(&de_ctx->sig_stat, sig_file, line, de_ctx->sigerror, (lineno - multiline))) {
-                SCLogError(SC_ERR_MEM_ALLOC, "Error adding sig \"%s\" from "
-                     "file %s at line %"PRId32"", line, sig_file, lineno - multiline);
-            }
-            if (de_ctx->sigerror) {
-                de_ctx->sigerror = NULL;
+            if (!de_ctx->sigerror_ok) {
+                bad++;
             }
         }
         multiline = 0;
@@ -340,7 +344,7 @@ int SigLoadSignatures(DetectEngineCtx *de_ctx, char *sig_file, int sig_file_excl
     /* now we should have signatures to work with */
     if (sig_stat->good_sigs_total <= 0) {
         if (sig_stat->total_files > 0) {
-           SCLogWarning(SC_ERR_NO_RULES_LOADED, "%d rule files specified, but no rule was loaded at all!", sig_stat->total_files);
+           SCLogWarning(SC_ERR_NO_RULES_LOADED, "%d rule files specified, but no rules were loaded!", sig_stat->total_files);
         } else {
             SCLogInfo("No signatures supplied.");
             goto end;
@@ -546,7 +550,7 @@ static TmEcode DetectLoaderThreadInit(ThreadVars *t, const void *initdata, void 
     if (ftd == NULL)
         return TM_ECODE_FAILED;
 
-    ftd->instance = SC_ATOMIC_ADD(detect_loader_cnt, 1) - 1; /* id's start at 0 */
+    ftd->instance = SC_ATOMIC_ADD(detect_loader_cnt, 1); /* id's start at 0 */
     SCLogDebug("detect loader instance %u", ftd->instance);
 
     /* pass thread data back to caller */

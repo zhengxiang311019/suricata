@@ -33,9 +33,11 @@
 #include "util-unittest.h"
 #include "util-unittest-helper.h"
 
+#ifdef UNITTESTS
 static void DetectAppLayerProtocolRegisterTests(void);
+#endif
 
-static int DetectAppLayerProtocolPacketMatch(ThreadVars *tv,
+static int DetectAppLayerProtocolPacketMatch(
         DetectEngineThreadCtx *det_ctx,
         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
@@ -111,7 +113,7 @@ static DetectAppLayerProtocolData *DetectAppLayerProtocolParse(const char *arg, 
     return data;
 }
 
-static _Bool HasConflicts(const DetectAppLayerProtocolData *us,
+static bool HasConflicts(const DetectAppLayerProtocolData *us,
                           const DetectAppLayerProtocolData *them)
 {
     /* mixing negated and non negated is illegal */
@@ -176,7 +178,7 @@ error:
     return -1;
 }
 
-static void DetectAppLayerProtocolFree(void *ptr)
+static void DetectAppLayerProtocolFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     SCFree(ptr);
     return;
@@ -228,7 +230,7 @@ PrefilterPacketAppProtoSet(PrefilterPacketHeaderValue *v, void *smctx)
     v->u8[2] = (uint8_t)a->negated;
 }
 
-static _Bool
+static bool
 PrefilterPacketAppProtoCompare(PrefilterPacketHeaderValue v, void *smctx)
 {
     const DetectAppLayerProtocolData *a = smctx;
@@ -246,7 +248,7 @@ static int PrefilterSetupAppProto(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
         PrefilterPacketAppProtoMatch);
 }
 
-static _Bool PrefilterAppProtoIsPrefilterable(const Signature *s)
+static bool PrefilterAppProtoIsPrefilterable(const Signature *s)
 {
     if (s->flags & SIG_FLAG_PDONLY) {
         SCLogDebug("prefilter on PD %u", s->id);
@@ -258,14 +260,18 @@ static _Bool PrefilterAppProtoIsPrefilterable(const Signature *s)
 void DetectAppLayerProtocolRegister(void)
 {
     sigmatch_table[DETECT_AL_APP_LAYER_PROTOCOL].name = "app-layer-protocol";
+    sigmatch_table[DETECT_AL_APP_LAYER_PROTOCOL].desc = "match on the detected app-layer protocol";
+    sigmatch_table[DETECT_AL_APP_LAYER_PROTOCOL].url = "/rules/app-layer.html#app-layer-protocol";
     sigmatch_table[DETECT_AL_APP_LAYER_PROTOCOL].Match =
         DetectAppLayerProtocolPacketMatch;
     sigmatch_table[DETECT_AL_APP_LAYER_PROTOCOL].Setup =
         DetectAppLayerProtocolSetup;
     sigmatch_table[DETECT_AL_APP_LAYER_PROTOCOL].Free =
         DetectAppLayerProtocolFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_AL_APP_LAYER_PROTOCOL].RegisterTests =
         DetectAppLayerProtocolRegisterTests;
+#endif
     sigmatch_table[DETECT_AL_APP_LAYER_PROTOCOL].flags =
         (SIGMATCH_QUOTES_OPTIONAL|SIGMATCH_HANDLE_NEGATION);
 
@@ -286,7 +292,7 @@ static int DetectAppLayerProtocolTest01(void)
     FAIL_IF_NULL(data);
     FAIL_IF(data->alproto != ALPROTO_HTTP);
     FAIL_IF(data->negated != 0);
-    DetectAppLayerProtocolFree(data);
+    DetectAppLayerProtocolFree(NULL, data);
     PASS;
 }
 
@@ -296,7 +302,7 @@ static int DetectAppLayerProtocolTest02(void)
     FAIL_IF_NULL(data);
     FAIL_IF(data->alproto != ALPROTO_HTTP);
     FAIL_IF(data->negated == 0);
-    DetectAppLayerProtocolFree(data);
+    DetectAppLayerProtocolFree(NULL, data);
     PASS;
 }
 
@@ -457,7 +463,7 @@ static int DetectAppLayerProtocolTest11(void)
     FAIL_IF_NULL(data);
     FAIL_IF(data->alproto != ALPROTO_FAILED);
     FAIL_IF(data->negated != 0);
-    DetectAppLayerProtocolFree(data);
+    DetectAppLayerProtocolFree(NULL, data);
     PASS;
 }
 
@@ -467,7 +473,7 @@ static int DetectAppLayerProtocolTest12(void)
     FAIL_IF_NULL(data);
     FAIL_IF(data->alproto != ALPROTO_FAILED);
     FAIL_IF(data->negated == 0);
-    DetectAppLayerProtocolFree(data);
+    DetectAppLayerProtocolFree(NULL, data);
     PASS;
 }
 
@@ -542,11 +548,9 @@ static int DetectAppLayerProtocolTest14(void)
     PASS;
 }
 
-#endif /* UNITTESTS */
 
 static void DetectAppLayerProtocolRegisterTests(void)
 {
-#ifdef UNITTESTS /* UNITTESTS */
     UtRegisterTest("DetectAppLayerProtocolTest01",
                    DetectAppLayerProtocolTest01);
     UtRegisterTest("DetectAppLayerProtocolTest02",
@@ -575,7 +579,5 @@ static void DetectAppLayerProtocolRegisterTests(void)
                    DetectAppLayerProtocolTest13);
     UtRegisterTest("DetectAppLayerProtocolTest14",
                    DetectAppLayerProtocolTest14);
-#endif /* UNITTESTS */
-
-    return;
 }
+#endif /* UNITTESTS */

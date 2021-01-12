@@ -196,20 +196,13 @@ static int DetectEngineInspectModbusAddress(ModbusTransaction   *tx,
  *
  *  \retval 0 no match or 1 match
  */
-int DetectEngineInspectModbus(ThreadVars            *tv,
-                              DetectEngineCtx       *de_ctx,
-                              DetectEngineThreadCtx *det_ctx,
-                              const Signature       *s,
-                              const SigMatchData    *smd,
-                              Flow                  *f,
-                              uint8_t               flags,
-                              void                  *alstate,
-                              void                  *txv,
-                              uint64_t              tx_id)
+int DetectEngineInspectModbus(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
+        const struct DetectEngineAppInspectionEngine_ *engine, const Signature *s, Flow *f,
+        uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
 {
     SCEnter();
     ModbusTransaction   *tx = (ModbusTransaction *)txv;
-    DetectModbus        *modbus = (DetectModbus *) smd->ctx;
+    DetectModbus *modbus = (DetectModbus *)engine->smd->ctx;
 
     int ret = 0;
 
@@ -230,10 +223,10 @@ int DetectEngineInspectModbus(ThreadVars            *tv,
         if (modbus->category == MODBUS_CAT_NONE) {
             if (modbus->function != MODBUS_FUNC_NONE) {
                 if (modbus->function == tx->function) {
-                    if (modbus->subfunction != NULL) {
+                    if (modbus->has_subfunction) {
                         SCLogDebug("looking for Modbus server function %d and subfunction %d",
-                                   modbus->function, *(modbus->subfunction));
-                        ret = (*(modbus->subfunction) == (tx->subFunction))? 1 : 0;
+                                   modbus->function, modbus->subfunction);
+                        ret = (modbus->subfunction == (tx->subFunction))? 1 : 0;
                     } else {
                         SCLogDebug("looking for Modbus server function %d", modbus->function);
                         ret = 1;

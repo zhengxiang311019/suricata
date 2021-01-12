@@ -53,16 +53,12 @@
 #include "util-print.h"
 
 #include "output.h"
-
-#ifdef HAVE_LIBJANSSON
 #include "output-json.h"
 #include "output-json-http.h"
 #include "output-json-tls.h"
 #include "output-json-ssh.h"
 #include "output-json-smtp.h"
 #include "output-json-email-common.h"
-#include <jansson.h>
-#endif
 
 #include "util-privs.h"
 #include "util-optimize.h"
@@ -473,7 +469,6 @@ static int AddIntData(idmef_alert_t *alert, const char *meaning, uint32_t data)
     SCReturnInt(0);
 }
 
-#ifdef HAVE_LIBJANSSON
 /**
  * \brief Add string data, to be stored in the Additional Data
  * field of the IDMEF alert (see section 4.2.4.6 of RFC 4765).
@@ -568,7 +563,6 @@ static int AddRealData(idmef_alert_t *alert, const char *meaning, uint32_t data)
 
     SCReturnInt(0);
 }
-#endif
 
 /**
  * \brief Add IPv4 header data, to be stored in the Additional Data
@@ -618,7 +612,6 @@ static int PacketToDataV6(const Packet *p, const PacketAlert *pa, idmef_alert_t 
     SCReturnInt(0);
 }
 
-#ifdef HAVE_LIBJANSSON
 /**
  * \brief Convert JSON object to Prelude additional data with
  * the right type of data. Browse the JSON object to get
@@ -695,6 +688,26 @@ static void PacketToDataProtoHTTP(const Packet *p, const PacketAlert *pa, idmef_
 }
 
 /**
+ * \brief Handle ALPROTO_HTTP2 JSON information
+ * \param p Packet where to extract data
+ * \param pa Packet alert information
+ * \param alert IDMEF alert
+ * \return void
+ */
+static void PacketToDataProtoHTTP2(const Packet *p, const PacketAlert *pa, idmef_alert_t *alert)
+{
+    void *http2_state = FlowGetAppState(f);
+    if (http2_state) {
+        void *tx_ptr = rs_http2_state_get_tx(http2_state, pa->tx_id);
+        json_t *js = rs_http2_log_json(tx_ptr);
+        if (unlikely(js == NULL))
+            return;
+        JsonToAdditionalData(NULL, js, alert);
+        json_decref(js);
+    }
+}
+
+/**
  * \brief Handle ALPROTO_TLS JSON information
  * \param p Packet where to extract data
  * \param pa Packet alert information
@@ -731,16 +744,16 @@ static void PacketToDataProtoTLS(const Packet *p, const PacketAlert *pa, idmef_a
 static void PacketToDataProtoSSH(const Packet *p, const PacketAlert *pa, idmef_alert_t *alert)
 {
     json_t *js, *s_js;
-    SshState *ssh_state = (SshState *)FlowGetAppState(p->flow);
+    void *ssh_state = FlowGetAppState(p->flow);
 
     if (ssh_state == NULL)
         return;
 
-    js = json_object();
-    if (js == NULL)
+    void *tx_ptr = rs_ssh_state_get_tx(ssh_state, 0);
+    BUG_ON(tx_ptr == NULL);
+    js = rs_ssh_log_json(tx_ptr);
+    if (unlikely(js == NULL))
         return;
-
-    JsonSshLogJSON(js, ssh_state);
 
     s_js = json_object_get(js, "server");
     if (s_js != NULL) {
@@ -798,8 +811,6 @@ static void PacketToDataProtoEmail(const Packet *p, const PacketAlert *pa, idmef
 
 }
 
-#endif
-
 /**
  * \brief Convert IP packet to an IDMEF alert (RFC 4765).
  * This function stores the alert SID (description and reference),
@@ -814,11 +825,13 @@ static int PacketToData(const Packet *p, const PacketAlert *pa, idmef_alert_t *a
     if (unlikely(p == NULL))
         SCReturnInt(0);
 
-#ifdef HAVE_LIBJANSSON
     if (p->flow != NULL) {
         uint16_t proto = FlowGetAppProtocol(p->flow);
         switch (proto) {
             case ALPROTO_HTTP:
+                PacketToDataProtoHTTP(p, pa, alert);
+                break;
+            case ALPROTO_HTTP2:
                 PacketToDataProtoHTTP(p, pa, alert);
                 break;
             case ALPROTO_TLS:
@@ -834,7 +847,6 @@ static int PacketToData(const Packet *p, const PacketAlert *pa, idmef_alert_t *a
                 break;
         }
     }
-#endif
 
     AddIntData(alert, "snort_rule_sid", pa->s->id);
     AddIntData(alert, "snort_rule_rev", pa->s->rev);

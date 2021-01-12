@@ -1,4 +1,4 @@
-/* Copyright (C) 2017 Open Information Security Foundation
+/* Copyright (C) 2017-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -35,16 +35,7 @@
 #include "app-layer-parser.h"
 
 #include "app-layer-tftp.h"
-
-#ifndef HAVE_RUST
-
-void RegisterTFTPParsers(void)
-{
-}
-
-#else
-
-#include "rust-tftp-tftp-gen.h"
+#include "rust.h"
 
 /* The default port to probe if not provided in the configuration file. */
 #define TFTP_DEFAULT_PORT "69"
@@ -53,28 +44,7 @@ void RegisterTFTPParsers(void)
  * be the size of a header. */
 #define TFTP_MIN_FRAME_LEN 4
 
-/* Enum of app-layer events for an echo protocol. Normally you might
- * have events for errors in parsing data, like unexpected data being
- * received. For echo we'll make something up, and log an app-layer
- * level alert if an empty message is received.
- *
- * Example rule:
- *
- * alert tftp any any -> any any (msg:"SURICATA TFTP empty message"; \
- *    app-layer-event:tftp.empty_message; sid:X; rev:Y;)
- */
-enum {
-    TFTP_DECODER_EVENT_EMPTY_MESSAGE,
-};
-
-SCEnumCharMap tftp_decoder_event_table[] = {
-    {"EMPTY_MESSAGE", TFTP_DECODER_EVENT_EMPTY_MESSAGE},
-
-    // event table must be NULL-terminated
-    { NULL, -1 },
-};
-
-static void *TFTPStateAlloc(void)
+static void *TFTPStateAlloc(void *orig_state, AppProto proto_orig)
 {
     return rs_tftp_state_alloc();
 }
@@ -101,7 +71,7 @@ static int TFTPStateGetEventInfo(const char *event_name, int *event_id,
     return -1;
 }
 
-static AppLayerDecoderEvents *TFTPGetEvents(void *state, uint64_t tx_id)
+static AppLayerDecoderEvents *TFTPGetEvents(void *tx)
 {
     return NULL;
 }
@@ -112,7 +82,8 @@ static AppLayerDecoderEvents *TFTPGetEvents(void *state, uint64_t tx_id)
  * \retval ALPROTO_TFTP if it looks like echo, otherwise
  *     ALPROTO_UNKNOWN.
  */
-static AppProto TFTPProbingParser(Flow *f, uint8_t *input, uint32_t input_len)
+static AppProto TFTPProbingParser(Flow *f, uint8_t direction,
+        const uint8_t *input, uint32_t input_len, uint8_t *rdir)
 {
     /* Very simple test - if there is input, this is tftp.
      * Also check if it's starting by a zero */
@@ -125,35 +96,39 @@ static AppProto TFTPProbingParser(Flow *f, uint8_t *input, uint32_t input_len)
     return ALPROTO_UNKNOWN;
 }
 
-static int TFTPParseRequest(Flow *f, void *state,
-    AppLayerParserState *pstate, uint8_t *input, uint32_t input_len,
+static AppLayerResult TFTPParseRequest(Flow *f, void *state,
+    AppLayerParserState *pstate, const uint8_t *input, uint32_t input_len,
     void *local_data, const uint8_t flags)
 {
     SCLogDebug("Parsing echo request: len=%"PRIu32, input_len);
 
     /* Likely connection closed, we can just return here. */
     if ((input == NULL || input_len == 0) &&
-        AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF)) {
-        return 0;
+        AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS)) {
+        SCReturnStruct(APP_LAYER_OK);
     }
 
     /* Probably don't want to create a transaction in this case
      * either. */
     if (input == NULL || input_len == 0) {
-        return 0;
+        SCReturnStruct(APP_LAYER_OK);
     }
 
-    return rs_tftp_request(state, input, input_len);
+    int res = rs_tftp_request(state, input, input_len);
+    if (res < 0) {
+        SCReturnStruct(APP_LAYER_ERROR);
+    }
+    SCReturnStruct(APP_LAYER_OK);
 }
 
 /**
  * \brief Response parsing is not implemented
  */
-static int TFTPParseResponse(Flow *f, void *state, AppLayerParserState *pstate,
-    uint8_t *input, uint32_t input_len, void *local_data,
+static AppLayerResult TFTPParseResponse(Flow *f, void *state, AppLayerParserState *pstate,
+    const uint8_t *input, uint32_t input_len, void *local_data,
     const uint8_t flags)
 {
-    return 0;
+    SCReturnStruct(APP_LAYER_OK);
 }
 
 static uint64_t TFTPGetTxCnt(void *state)
@@ -164,25 +139,6 @@ static uint64_t TFTPGetTxCnt(void *state)
 static void *TFTPGetTx(void *state, uint64_t tx_id)
 {
     return rs_tftp_get_tx(state, tx_id);
-}
-
-static void TFTPSetTxLogged(void *state, void *vtx, uint32_t logger)
-{
-    rs_tftp_set_tx_logged(state, vtx, logger);
-}
-
-static LoggerId TFTPGetTxLogged(void *state, void *vtx)
-{
-    return rs_tftp_get_tx_logged(state, vtx);
-}
-
-/**
- * \brief Called by the application layer.
- *
- * In most cases 1 can be returned here.
- */
-static int TFTPGetAlstateProgressCompletionStatus(uint8_t direction) {
-    return 1;
 }
 
 /**
@@ -231,12 +187,12 @@ void RegisterTFTPParsers(void)
             AppLayerProtoDetectPPRegister(IPPROTO_UDP, TFTP_DEFAULT_PORT,
                                           ALPROTO_TFTP, 0, TFTP_MIN_FRAME_LEN,
                                           STREAM_TOSERVER, TFTPProbingParser,
-                                          NULL);
+                                          TFTPProbingParser);
         } else {
             if (!AppLayerProtoDetectPPParseConfPorts("udp", IPPROTO_UDP,
                                                      proto_name, ALPROTO_TFTP,
                                                      0, TFTP_MIN_FRAME_LEN,
-                                                     TFTPProbingParser, NULL)) {
+                                                     TFTPProbingParser, TFTPProbingParser)) {
                 SCLogDebug("No echo app-layer configuration, enabling echo"
                            " detection UDP detection on port %s.",
                            TFTP_DEFAULT_PORT);
@@ -244,7 +200,7 @@ void RegisterTFTPParsers(void)
                                               TFTP_DEFAULT_PORT, ALPROTO_TFTP,
                                               0, TFTP_MIN_FRAME_LEN,
                                               STREAM_TOSERVER,TFTPProbingParser,
-                                              NULL);
+                                              TFTPProbingParser);
             }
         }
     } else {
@@ -274,16 +230,12 @@ void RegisterTFTPParsers(void)
         AppLayerParserRegisterTxFreeFunc(IPPROTO_UDP, ALPROTO_TFTP,
                                          TFTPStateTxFree);
 
-        AppLayerParserRegisterLoggerFuncs(IPPROTO_UDP, ALPROTO_TFTP,
-                                          TFTPGetTxLogged, TFTPSetTxLogged);
-
         /* Register a function to return the current transaction count. */
         AppLayerParserRegisterGetTxCnt(IPPROTO_UDP, ALPROTO_TFTP,
                                        TFTPGetTxCnt);
 
         /* Transaction handling. */
-        AppLayerParserRegisterGetStateProgressCompletionStatus(ALPROTO_TFTP,
-            TFTPGetAlstateProgressCompletionStatus);
+        AppLayerParserRegisterStateProgressCompletionStatus(ALPROTO_TFTP, 1, 1);
         AppLayerParserRegisterGetStateProgressFunc(IPPROTO_UDP,
                                                    ALPROTO_TFTP,
                                                    TFTPGetStateProgress);
@@ -299,24 +251,11 @@ void RegisterTFTPParsers(void)
                                            TFTPStateGetEventInfo);
         AppLayerParserRegisterGetEventsFunc(IPPROTO_UDP, ALPROTO_TFTP,
                                             TFTPGetEvents);
+
+        AppLayerParserRegisterTxDataFunc(IPPROTO_UDP, ALPROTO_TFTP,
+                                         rs_tftp_get_tx_data);
     }
     else {
         SCLogDebug("TFTP protocol parsing disabled.");
     }
-
-#ifdef UNITTESTS
-    AppLayerParserRegisterProtocolUnittests(IPPROTO_UDP, ALPROTO_TFTP,
-                                            TFTPParserRegisterTests);
-#endif
 }
-
-#ifdef UNITTESTS
-#endif
-
-void TFTPParserRegisterTests(void)
-{
-#ifdef UNITTESTS
-#endif
-}
-
-#endif /* HAVE_RUST */

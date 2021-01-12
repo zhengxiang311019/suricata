@@ -39,7 +39,7 @@
  *  \param buf buffer to print from
  *  \param buflen length of the input buffer
  */
-void PrintBufferRawLineHex(char *nbuf, int *offset, int max_size, uint8_t *buf, uint32_t buflen)
+void PrintBufferRawLineHex(char *nbuf, int *offset, int max_size, const uint8_t *buf, uint32_t buflen)
 {
     uint32_t u = 0;
 
@@ -58,7 +58,7 @@ void PrintBufferRawLineHex(char *nbuf, int *offset, int max_size, uint8_t *buf, 
  *  \param buf buffer to print from
  *  \param buflen length of the input buffer
  */
-void PrintRawLineHexBuf(char *retbuf, uint32_t retbuflen, uint8_t *buf, uint32_t buflen)
+void PrintRawLineHexBuf(char *retbuf, uint32_t retbuflen, const uint8_t *buf, uint32_t buflen)
 {
     uint32_t offset = 0;
     uint32_t u = 0;
@@ -143,6 +143,10 @@ void PrintRawDataFp(FILE *fp, const uint8_t *buf, uint32_t buflen)
     int ch = 0;
     uint32_t u = 0;
 
+    if (buf == NULL) {
+        fprintf(fp, " (null)\n");
+        return;
+    }
     for (u = 0; u < buflen; u+=16) {
         fprintf(fp ," %04X  ", u);
         for (ch = 0; (u+ch) < buflen && ch < 16; ch++) {

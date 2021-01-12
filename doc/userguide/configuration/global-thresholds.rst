@@ -20,7 +20,7 @@ Syntax:
 ::
 
   threshold gen_id <gid>, sig_id <sid>, type <threshold|limit|both>, \
-    track <by_src|by_dst>, count <N>, seconds <T>
+    track <by_src|by_dst|by_rule|by_both>, count <N>, seconds <T>
 
 rate_filter
 ~~~~~~~~~~~
@@ -87,7 +87,7 @@ Time in seconds during which the ``rate_filter`` will remain active.
 Example
 ^^^^^^^
 
-Lets say we want to limit incoming connections to our SSH server. The rule
+Let's say we want to limit incoming connections to our SSH server. The rule
 ``888`` below simply alerts on SYN packets to the SSH port of our SSH server.
 If an IP-address triggers this more than 10 or more with a minute, the
 drop ``rate_filter`` is set with a timeout of 5 minutes.
@@ -190,7 +190,7 @@ Threshold/event_filter
 When applied to a specific signature, thresholds and event_filters
 (threshold from now on) will override the signature setting. This can
 be useful for when the default in a signature doesn't suit your
-evironment.
+environment.
 
 ::
 

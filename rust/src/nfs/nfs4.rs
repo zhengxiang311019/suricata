@@ -1,4 +1,4 @@
-/* Copyright (C) 2018 Open Information Security Foundation
+/* Copyright (C) 2018-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -17,25 +17,22 @@
 
 // written by Victor Julien
 
-extern crate libc;
+use nom;
+use nom::number::streaming::be_u32;
 
-use nom::{IResult, be_u32};
+use crate::core::*;
+use crate::nfs::nfs::*;
+use crate::nfs::types::*;
+use crate::nfs::rpc_records::*;
+use crate::nfs::nfs_records::*;
+use crate::nfs::nfs4_records::*;
 
-use core::*;
-use log::*;
+use crate::kerberos::{parse_kerberos5_request, Kerberos5Ticket, SecBlobError};
 
-use nfs::nfs::*;
-use nfs::types::*;
-use nfs::rpc_records::*;
-use nfs::nfs_records::*;
-use nfs::nfs4_records::*;
-
-use kerberos;
-
-named!(parse_req_gssapi<kerberos::Kerberos5Ticket>,
+named!(parse_req_gssapi<&[u8], Kerberos5Ticket, SecBlobError>,
    do_parse!(
         len: be_u32
-    >>  ap: flat_map!(take!(len), call!(kerberos::parse_kerberos5_request))
+    >>  ap: flat_map!(take!(len), parse_kerberos5_request)
     >> ( ap )
 ));
 
@@ -55,15 +52,12 @@ impl NFSState {
         }
 
         let file_handle = fh.to_vec();
-        let file_name = match self.namemap.get(fh) {
-            Some(n) => {
-                SCLogDebug!("WRITE name {:?}", n);
-                n.to_vec()
-            },
-            None => {
-                SCLogDebug!("WRITE object {:?} not found", w.stateid.data);
-                Vec::new()
-            },
+        let file_name = if let Some(name) = self.namemap.get(fh) {
+            SCLogDebug!("WRITE name {:?}", name);
+            name.to_vec()
+        } else {
+            SCLogDebug!("WRITE object {:?} not found", w.stateid.data);
+            Vec::new()
         };
 
         let found = match self.get_file_tx_by_handle(&file_handle, STREAM_TOSERVER) {
@@ -81,7 +75,7 @@ impl NFSState {
                 }
                 true
             },
-            None => { false },
+            None => false,
         };
         if !found {
             let (tx, files, flags) = self.new_file_tx(&file_handle, &file_name, STREAM_TOSERVER);
@@ -110,16 +104,13 @@ impl NFSState {
         SCLogDebug!("COMMIT, closing shop");
 
         let file_handle = fh.to_vec();
-        match self.get_file_tx_by_handle(&file_handle, STREAM_TOSERVER) {
-            Some((tx, files, flags)) => {
-                if let Some(NFSTransactionTypeData::FILE(ref mut tdf)) = tx.type_data {
-                    tdf.file_tracker.close(files, flags);
-                    tdf.file_last_xid = r.hdr.xid;
-                    tx.is_last = true;
-                    tx.request_done = true;
-                }
+        if let Some((tx, files, flags)) = self.get_file_tx_by_handle(&file_handle, STREAM_TOSERVER) {
+            if let Some(NFSTransactionTypeData::FILE(ref mut tdf)) = tx.type_data {
+                tdf.file_tracker.close(files, flags);
+                tdf.file_last_xid = r.hdr.xid;
+                tx.is_last = true;
+                tx.request_done = true;
             }
-            None => {},
         }
     }
 
@@ -227,7 +218,7 @@ impl NFSState {
     }
 
     /// complete request record
-    pub fn process_request_record_v4<'b>(&mut self, r: &RpcPacket<'b>) -> u32 {
+    pub fn process_request_record_v4<'b>(&mut self, r: &RpcPacket<'b>) {
         SCLogDebug!("NFSv4 REQUEST {} procedure {} ({}) blob size {}",
                 r.hdr.xid, r.procedure, self.requestmap.len(), r.prog_data.len());
 
@@ -247,37 +238,39 @@ impl NFSState {
                 if creds.procedure == 0  && creds.service == 2 {
                     SCLogDebug!("GSS INTEGRITIY: {:?}", creds);
                     match parse_rpc_gssapi_integrity(r.prog_data) {
-                        IResult::Done(_rem, rec) => {
+                        Ok((_rem, rec)) => {
                             SCLogDebug!("GSS INTEGRITIY wrapper: {:?}", rec);
                             data = rec.data;
                             // store proc and serv for the reply
                             xidmap.gssapi_proc = creds.procedure;
                             xidmap.gssapi_service = creds.service;
                         },
-                        IResult::Incomplete(_n) => {
+                        Err(nom::Err::Incomplete(_n)) => {
                             SCLogDebug!("NFSPROC4_COMPOUND/GSS INTEGRITIY: INCOMPLETE {:?}", _n);
                             self.set_event(NFSEvent::MalformedData);
-                            return 0;
+                            return;
                         },
-                        IResult::Error(_e) => {
+                        Err(nom::Err::Error(_e)) |
+                        Err(nom::Err::Failure(_e)) => {
                             SCLogDebug!("NFSPROC4_COMPOUND/GSS INTEGRITIY: Parsing failed: {:?}", _e);
                             self.set_event(NFSEvent::MalformedData);
-                            return 0;
+                            return;
                         },
                     }
                 }
             }
 
             match parse_nfs4_request_compound(data) {
-                IResult::Done(_, rd) => {
+                Ok((_, rd)) => {
                     SCLogDebug!("NFSPROC4_COMPOUND: {:?}", rd);
                     self.compound_request(&r, &rd, &mut xidmap);
                 },
-                IResult::Incomplete(_n) => {
+                Err(nom::Err::Incomplete(_n)) => {
                     SCLogDebug!("NFSPROC4_COMPOUND: INCOMPLETE {:?}", _n);
                     self.set_event(NFSEvent::MalformedData);
                 },
-                IResult::Error(_e) => {
+                Err(nom::Err::Error(_e)) |
+                Err(nom::Err::Failure(_e)) => {
                     SCLogDebug!("NFSPROC4_COMPOUND: Parsing failed: {:?}", _e);
                     self.set_event(NFSEvent::MalformedData);
                 },
@@ -285,7 +278,6 @@ impl NFSState {
         }
 
         self.requestmap.insert(r.hdr.xid, xidmap);
-        0
     }
 
     fn compound_response<'b>(&mut self, r: &RpcReplyPacket<'b>,
@@ -368,7 +360,7 @@ impl NFSState {
     }
 
     pub fn process_reply_record_v4<'b>(&mut self, r: &RpcReplyPacket<'b>,
-            xidmap: &mut NFSRequestXidMap) -> u32 {
+            xidmap: &mut NFSRequestXidMap) {
         if xidmap.procedure == NFSPROC4_COMPOUND {
             let mut data = r.prog_data;
 
@@ -376,36 +368,37 @@ impl NFSState {
 
                 SCLogDebug!("GSS INTEGRITIY as set by call: {:?}", xidmap);
                 match parse_rpc_gssapi_integrity(r.prog_data) {
-                    IResult::Done(_rem, rec) => {
+                    Ok((_rem, rec)) => {
                         SCLogDebug!("GSS INTEGRITIY wrapper: {:?}", rec);
                         data = rec.data;
                     },
-                    IResult::Incomplete(_n) => {
+                    Err(nom::Err::Incomplete(_n)) => {
                         SCLogDebug!("NFSPROC4_COMPOUND/GSS INTEGRITIY: INCOMPLETE {:?}", _n);
                         self.set_event(NFSEvent::MalformedData);
-                        return 0;
+                        return;
                     },
-                    IResult::Error(_e) => {
+                    Err(nom::Err::Error(_e)) |
+                    Err(nom::Err::Failure(_e)) => {
                         SCLogDebug!("NFSPROC4_COMPOUND/GSS INTEGRITIY: Parsing failed: {:?}", _e);
                         self.set_event(NFSEvent::MalformedData);
-                        return 0;
+                        return;
                     },
                 }
             }
             match parse_nfs4_response_compound(data) {
-                IResult::Done(_, rd) => {
+                Ok((_, rd)) => {
                     SCLogDebug!("COMPOUNDv4: {:?}", rd);
                     self.compound_response(&r, &rd, xidmap);
                 },
-                IResult::Incomplete(_) => {
+                Err(nom::Err::Incomplete(_)) => {
                     self.set_event(NFSEvent::MalformedData);
                 },
-                IResult::Error(_e) => {
+                Err(nom::Err::Error(_e)) |
+                Err(nom::Err::Failure(_e)) => {
                     SCLogDebug!("Parsing failed: {:?}", _e);
                     self.set_event(NFSEvent::MalformedData);
                 },
             };
         }
-        0
     }
 }

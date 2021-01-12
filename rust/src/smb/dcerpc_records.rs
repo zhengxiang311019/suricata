@@ -15,7 +15,12 @@
  * 02110-1301, USA.
  */
 
-use nom::{rest, le_u8, be_u16, le_u16, le_u32, IResult, ErrorKind, Endianness};
+use crate::smb::error::SmbError;
+use nom;
+use nom::IResult;
+use nom::combinator::rest;
+use nom::number::Endianness;
+use nom::number::streaming::{be_u16, le_u8, le_u16, le_u32};
 
 #[derive(Debug,PartialEq)]
 pub struct DceRpcResponseRecord<'a> {
@@ -25,10 +30,10 @@ pub struct DceRpcResponseRecord<'a> {
 /// parse a packet type 'response' DCERPC record. Implemented
 /// as function to be able to pass the fraglen in.
 pub fn parse_dcerpc_response_record(i:&[u8], frag_len: u16 )
-    -> IResult<&[u8], DceRpcResponseRecord>
+    -> IResult<&[u8], DceRpcResponseRecord, SmbError>
 {
     if frag_len < 24 {
-        return IResult::Error(error_code!(ErrorKind::Custom(128)));
+        return Err(nom::Err::Error(SmbError::RecordTooSmall));
     }
     do_parse!(i,
                 take!(8)
@@ -48,10 +53,10 @@ pub struct DceRpcRequestRecord<'a> {
 /// parse a packet type 'request' DCERPC record. Implemented
 /// as function to be able to pass the fraglen in.
 pub fn parse_dcerpc_request_record(i:&[u8], frag_len: u16, little: bool)
-    -> IResult<&[u8], DceRpcRequestRecord>
+    -> IResult<&[u8], DceRpcRequestRecord, SmbError>
 {
     if frag_len < 24 {
-        return IResult::Error(error_code!(ErrorKind::Custom(128)));
+        return Err(nom::Err::Error(SmbError::RecordTooSmall));
     }
     do_parse!(i,
                 take!(6)
@@ -74,8 +79,8 @@ pub struct DceRpcBindIface<'a> {
 
 named!(pub parse_dcerpc_bind_iface<DceRpcBindIface>,
     do_parse!(
-            ctx_id: le_u16
-        >>  num_trans_items: le_u8
+            _ctx_id: le_u16
+        >>  _num_trans_items: le_u8
         >>  take!(1) // reserved
         >>  interface: take!(16)
         >>  ver: le_u16
@@ -90,8 +95,8 @@ named!(pub parse_dcerpc_bind_iface<DceRpcBindIface>,
 
 named!(pub parse_dcerpc_bind_iface_big<DceRpcBindIface>,
     do_parse!(
-            ctx_id: le_u16
-        >>  num_trans_items: le_u8
+            _ctx_id: le_u16
+        >>  _num_trans_items: le_u8
         >>  take!(1) // reserved
         >>  interface: take!(16)
         >>  ver_min: be_u16
@@ -112,9 +117,9 @@ pub struct DceRpcBindRecord<'a> {
 
 named!(pub parse_dcerpc_bind_record<DceRpcBindRecord>,
     do_parse!(
-            max_xmit_frag: le_u16
-        >>  max_recv_frag: le_u16
-        >>  assoc_group: take!(4)
+            _max_xmit_frag: le_u16
+        >>  _max_recv_frag: le_u16
+        >>  _assoc_group: take!(4)
         >>  num_ctx_items: le_u8
         >>  take!(3) // reserved
         >>  ifaces: count!(parse_dcerpc_bind_iface, num_ctx_items as usize)
@@ -126,9 +131,9 @@ named!(pub parse_dcerpc_bind_record<DceRpcBindRecord>,
 
 named!(pub parse_dcerpc_bind_record_big<DceRpcBindRecord>,
     do_parse!(
-            max_xmit_frag: be_u16
-        >>  max_recv_frag: be_u16
-        >>  assoc_group: take!(4)
+            _max_xmit_frag: be_u16
+        >>  _max_recv_frag: be_u16
+        >>  _assoc_group: take!(4)
         >>  num_ctx_items: le_u8
         >>  take!(3) // reserved
         >>  ifaces: count!(parse_dcerpc_bind_iface_big, num_ctx_items as usize)
@@ -168,9 +173,9 @@ pub struct DceRpcBindAckRecord<'a> {
 
 named!(pub parse_dcerpc_bindack_record<DceRpcBindAckRecord>,
     do_parse!(
-            max_xmit_frag: le_u16
-        >>  max_recv_frag: le_u16
-        >>  assoc_group: take!(4)
+            _max_xmit_frag: le_u16
+        >>  _max_recv_frag: le_u16
+        >>  _assoc_group: take!(4)
         >>  sec_addr_len: le_u16
         >>  take!(sec_addr_len)
         >>  cond!((sec_addr_len+2) % 4 != 0, take!(4 - (sec_addr_len+2) % 4))
@@ -201,22 +206,32 @@ pub struct DceRpcRecord<'a> {
     pub data: &'a[u8],
 }
 
+fn parse_dcerpc_flags1(i:&[u8]) -> IResult<&[u8],(u8,u8,u8)> {
+    bits!(i,
+        tuple!(
+            take_bits!(6u8),
+            take_bits!(1u8),   // last (1)
+            take_bits!(1u8)))  // first (2)
+}
+
+fn parse_dcerpc_flags2(i:&[u8]) -> IResult<&[u8],(u32,u32,u32)> {
+    bits!(i,
+        tuple!(
+            take_bits!(3u32),
+            take_bits!(1u32),     // endianess
+            take_bits!(28u32)))
+}
+
 named!(pub parse_dcerpc_record<DceRpcRecord>,
     do_parse!(
             version_major: le_u8
         >>  version_minor: le_u8
         >>  packet_type: le_u8
-        >>  packet_flags: bits!(tuple!(
-               take_bits!(u8, 6),
-               take_bits!(u8, 1),   // last (1)
-               take_bits!(u8, 1)))  // first (2)
-        >>  data_rep: bits!(tuple!(
-                take_bits!(u32, 3),
-                take_bits!(u32, 1),     // endianess
-                take_bits!(u32, 28)))
+        >>  packet_flags: parse_dcerpc_flags1
+        >>  data_rep: parse_dcerpc_flags2
         >>  endian: value!(if data_rep.1 == 0 { Endianness::Big } else { Endianness::Little })
         >>  frag_len: u16!(endian)
-        >>  auth: u16!(endian)
+        >>  _auth: u16!(endian)
         >>  call_id: u32!(endian)
         >>  data:rest
         >> (DceRpcRecord {

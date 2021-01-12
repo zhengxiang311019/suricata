@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2018 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -23,6 +23,7 @@
  */
 
 #include "suricata-common.h"
+#include "util-byte.h"
 
 #include "detect.h"
 #include "detect-parse.h"
@@ -35,19 +36,18 @@
  */
 #define PARSE_REGEX  "^\\s*([0-9]*)?\\s*([<>=-]+)?\\s*([0-9]+)?\\s*$"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
 /* prototypes */
-static int DetectTemplate2Match (ThreadVars *, DetectEngineThreadCtx *, Packet *,
+static int DetectTemplate2Match (DetectEngineThreadCtx *, Packet *,
         const Signature *, const SigMatchCtx *);
 static int DetectTemplate2Setup (DetectEngineCtx *, Signature *, const char *);
-void DetectTemplate2Free (void *);
+void DetectTemplate2Free (DetectEngineCtx *, void *);
 #ifdef UNITTESTS
 void DetectTemplate2RegisterTests (void);
 #endif
 static int PrefilterSetupTemplate2(DetectEngineCtx *de_ctx, SigGroupHead *sgh);
-static _Bool PrefilterTemplate2IsPrefilterable(const Signature *s);
+static bool PrefilterTemplate2IsPrefilterable(const Signature *s);
 
 /**
  * \brief Registration function for template2: keyword
@@ -57,7 +57,7 @@ void DetectTemplate2Register(void)
 {
     sigmatch_table[DETECT_TEMPLATE2].name = "template2";
     sigmatch_table[DETECT_TEMPLATE2].desc = "TODO describe the keyword";
-    sigmatch_table[DETECT_TEMPLATE2].url = DOC_URL DOC_VERSION "/rules/header-keywords.html#template2";
+    sigmatch_table[DETECT_TEMPLATE2].url = "/rules/header-keywords.html#template2";
     sigmatch_table[DETECT_TEMPLATE2].Match = DetectTemplate2Match;
     sigmatch_table[DETECT_TEMPLATE2].Setup = DetectTemplate2Setup;
     sigmatch_table[DETECT_TEMPLATE2].Free = DetectTemplate2Free;
@@ -67,7 +67,7 @@ void DetectTemplate2Register(void)
     sigmatch_table[DETECT_TEMPLATE2].SupportsPrefilter = PrefilterTemplate2IsPrefilterable;
     sigmatch_table[DETECT_TEMPLATE2].SetupPrefilter = PrefilterSetupTemplate2;
 
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
     return;
 }
 
@@ -97,7 +97,7 @@ static inline int Template2Match(const uint8_t parg, const uint8_t mode,
  * \retval 0 no match
  * \retval 1 match
  */
-static int DetectTemplate2Match (ThreadVars *t, DetectEngineThreadCtx *det_ctx, Packet *p,
+static int DetectTemplate2Match (DetectEngineThreadCtx *det_ctx, Packet *p,
         const Signature *s, const SigMatchCtx *ctx)
 {
 
@@ -134,11 +134,10 @@ static DetectTemplate2Data *DetectTemplate2Parse (const char *template2str)
     char *arg1 = NULL;
     char *arg2 = NULL;
     char *arg3 = NULL;
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
 
-    ret = pcre_exec(parse_regex, parse_regex_study, template2str, strlen(template2str), 0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, template2str, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 2 || ret > 4) {
         SCLogError(SC_ERR_PCRE_MATCH, "parse error, ret %" PRId32 "", ret);
         goto error;
@@ -187,8 +186,11 @@ static DetectTemplate2Data *DetectTemplate2Parse (const char *template2str)
                     goto error;
 
                 template2d->mode = DETECT_TEMPLATE2_LT;
-                template2d->arg1 = (uint8_t) atoi(arg3);
-
+                if (StringParseUint8(&template2d->arg1, 10, 0, (const char *)arg3) < 0) {
+                    SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid first arg:"
+                               " \"%s\"", arg3);
+                    goto error;
+                }
                 SCLogDebug("template2 is %"PRIu8"",template2d->arg1);
                 if (strlen(arg1) > 0)
                     goto error;
@@ -199,8 +201,11 @@ static DetectTemplate2Data *DetectTemplate2Parse (const char *template2str)
                     goto error;
 
                 template2d->mode = DETECT_TEMPLATE2_GT;
-                template2d->arg1 = (uint8_t) atoi(arg3);
-
+                if (StringParseUint8(&template2d->arg1, 10, 0, (const char *)arg3) < 0) {
+                    SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid first arg:"
+                               " \"%s\"", arg3);
+                    goto error;
+                }
                 SCLogDebug("template2 is %"PRIu8"",template2d->arg1);
                 if (strlen(arg1) > 0)
                     goto error;
@@ -213,9 +218,16 @@ static DetectTemplate2Data *DetectTemplate2Parse (const char *template2str)
                     goto error;
 
                 template2d->mode = DETECT_TEMPLATE2_RA;
-                template2d->arg1 = (uint8_t) atoi(arg1);
-
-                template2d->arg2 = (uint8_t) atoi(arg3);
+                if (StringParseUint8(&template2d->arg1, 10, 0, (const char *)arg1) < 0) {
+                    SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid first arg:"
+                               " \"%s\"", arg1);
+                    goto error;
+                }
+                if (StringParseUint8(&template2d->arg2, 10, 0, (const char *)arg3) < 0) {
+                    SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid second arg:"
+                               " \"%s\"", arg3);
+                    goto error;
+                }
                 SCLogDebug("template2 is %"PRIu8" to %"PRIu8"",template2d->arg1, template2d->arg2);
                 if (template2d->arg1 >= template2d->arg2) {
                     SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid template2 range. ");
@@ -230,7 +242,11 @@ static DetectTemplate2Data *DetectTemplate2Parse (const char *template2str)
                     (arg1 == NULL ||strlen(arg1) == 0))
                     goto error;
 
-                template2d->arg1 = (uint8_t) atoi(arg1);
+                if (StringParseUint8(&template2d->arg1, 10, 0, (const char *)arg1) < 0) {
+                    SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid first arg:"
+                               " \"%s\"", arg1);
+                    goto error;
+                }
                 break;
         }
     } else {
@@ -240,7 +256,11 @@ static DetectTemplate2Data *DetectTemplate2Parse (const char *template2str)
             (arg1 == NULL ||strlen(arg1) == 0))
             goto error;
 
-        template2d->arg1 = (uint8_t) atoi(arg1);
+        if (StringParseUint8(&template2d->arg1, 10, 0, (const char *)arg1) < 0) {
+            SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid first arg:"
+                       " \"%s\"", arg1);
+            goto error;
+        }
     }
 
     SCFree(arg1);
@@ -278,7 +298,7 @@ static int DetectTemplate2Setup (DetectEngineCtx *de_ctx, Signature *s, const ch
 
     SigMatch *sm = SigMatchAlloc();
     if (sm == NULL) {
-        DetectTemplate2Free(template2d);
+        DetectTemplate2Free(de_ctx, template2d);
         return -1;
     }
 
@@ -296,7 +316,7 @@ static int DetectTemplate2Setup (DetectEngineCtx *de_ctx, Signature *s, const ch
  *
  * \param ptr pointer to DetectTemplate2Data
  */
-void DetectTemplate2Free(void *ptr)
+void DetectTemplate2Free(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectTemplate2Data *template2d = (DetectTemplate2Data *)ptr;
     SCFree(template2d);
@@ -346,7 +366,7 @@ PrefilterPacketTemplate2Set(PrefilterPacketHeaderValue *v, void *smctx)
     v->u8[2] = a->arg2;
 }
 
-static _Bool
+static bool
 PrefilterPacketTemplate2Compare(PrefilterPacketHeaderValue v, void *smctx)
 {
     const DetectTemplate2Data *a = smctx;
@@ -365,7 +385,7 @@ static int PrefilterSetupTemplate2(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
             PrefilterPacketTemplate2Match);
 }
 
-static _Bool PrefilterTemplate2IsPrefilterable(const Signature *s)
+static bool PrefilterTemplate2IsPrefilterable(const Signature *s)
 {
     const SigMatch *sm;
     for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {

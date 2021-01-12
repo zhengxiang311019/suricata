@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -33,17 +33,19 @@
 #include "detect-fast-pattern.h"
 
 #include "util-error.h"
+#include "util-byte.h"
 #include "util-debug.h"
 #include "util-unittest.h"
 #include "util-unittest-helper.h"
 
 #define PARSE_REGEX "^(\\s*only\\s*)|\\s*([0-9]+)\\s*,\\s*([0-9]+)\\s*$"
 
-static pcre *parse_regex = NULL;
-static pcre_extra *parse_regex_study = NULL;
+static DetectParseRegex parse_regex;
 
 static int DetectFastPatternSetup(DetectEngineCtx *, Signature *, const char *);
-void DetectFastPatternRegisterTests(void);
+#ifdef UNITTESTS
+static void DetectFastPatternRegisterTests(void);
+#endif
 
 /* holds the list of sm match lists that need to be searched for a keyword
  * that has fp support */
@@ -98,7 +100,11 @@ void SupportFastPatternForSigMatchList(int list_id, int priority)
             return;
         }
 
-        if (priority <= tmp->priority)
+        /* We need a strict check to be sure that the current list
+         * was not already registered
+         * and other lists with the same priority hide it.
+         */
+        if (priority < tmp->priority)
             break;
 
         ip = tmp;
@@ -162,15 +168,16 @@ void DetectFastPatternRegister(void)
 {
     sigmatch_table[DETECT_FAST_PATTERN].name = "fast_pattern";
     sigmatch_table[DETECT_FAST_PATTERN].desc = "force using preceding content in the multi pattern matcher";
-    sigmatch_table[DETECT_FAST_PATTERN].url = DOC_URL DOC_VERSION "/rules/http-keywords.html#fast-pattern";
+    sigmatch_table[DETECT_FAST_PATTERN].url = "/rules/prefilter-keywords.html#fast-pattern";
     sigmatch_table[DETECT_FAST_PATTERN].Match = NULL;
     sigmatch_table[DETECT_FAST_PATTERN].Setup = DetectFastPatternSetup;
     sigmatch_table[DETECT_FAST_PATTERN].Free  = NULL;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_FAST_PATTERN].RegisterTests = DetectFastPatternRegisterTests;
+#endif
+    sigmatch_table[DETECT_FAST_PATTERN].flags |= SIGMATCH_OPTIONAL_OPT;
 
-    sigmatch_table[DETECT_FAST_PATTERN].flags |= SIGMATCH_NOOPT;
-
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 //static int DetectFastPatternParseArg(
@@ -181,14 +188,13 @@ void DetectFastPatternRegister(void)
  *
  * \param de_ctx   Pointer to the Detection Engine Context.
  * \param s        Pointer to the Signature to which the current keyword belongs.
- * \param null_str Should hold an empty string always.
+ * \param arg      May hold an argument
  *
  * \retval  0 On success.
  * \retval -1 On failure.
  */
 static int DetectFastPatternSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
     char arg_substr[128] = "";
@@ -255,8 +261,7 @@ static int DetectFastPatternSetup(DetectEngineCtx *de_ctx, Signature *s, const c
     }
 
     /* Execute the regex and populate args with captures. */
-    ret = pcre_exec(parse_regex, parse_regex_study, arg,
-                    strlen(arg), 0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, arg, 0, 0, ov, MAX_SUBSTRINGS);
     /* fast pattern only */
     if (ret == 2) {
         if ((cd->flags & DETECT_CONTENT_NEGATED) ||
@@ -282,10 +287,11 @@ static int DetectFastPatternSetup(DetectEngineCtx *de_ctx, Signature *s, const c
                        "for fast_pattern offset");
             goto error;
         }
-        int offset = atoi(arg_substr);
-        if (offset > 65535) {
-            SCLogError(SC_ERR_INVALID_SIGNATURE, "Fast pattern offset exceeds "
-                       "limit");
+        uint16_t offset;
+        if (StringParseUint16(&offset, 10, 0,
+                              (const char *)arg_substr) < 0) {
+            SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid fast pattern offset:"
+                       " \"%s\"", arg_substr);
             goto error;
         }
 
@@ -296,14 +302,16 @@ static int DetectFastPatternSetup(DetectEngineCtx *de_ctx, Signature *s, const c
                        "for fast_pattern offset");
             goto error;
         }
-        int length = atoi(arg_substr);
-        if (length > 65535) {
-            SCLogError(SC_ERR_INVALID_SIGNATURE, "Fast pattern length exceeds "
-                       "limit");
+        uint16_t length;
+        if (StringParseUint16(&length, 10, 0,
+                              (const char *)arg_substr) < 0) {
+            SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid value for fast "
+                       "pattern: \"%s\"", arg_substr);
             goto error;
         }
 
-        if (offset + length > 65535) {
+        // Avoiding integer overflow
+        if (offset > (65535 - length)) {
             SCLogError(SC_ERR_INVALID_SIGNATURE, "Fast pattern (length + offset) "
                        "exceeds limit pattern length limit");
             goto error;
@@ -18859,11 +18867,8 @@ static int DetectFastPatternTest671(void)
     PASS;
 }
 
-#endif
-
-void DetectFastPatternRegisterTests(void)
+static void DetectFastPatternRegisterTests(void)
 {
-#ifdef UNITTESTS
     g_file_data_buffer_id = DetectBufferTypeGetByName("file_data");
     g_http_method_buffer_id = DetectBufferTypeGetByName("http_method");
     g_http_uri_buffer_id = DetectBufferTypeGetByName("http_uri");
@@ -19579,7 +19584,5 @@ void DetectFastPatternRegisterTests(void)
      * - if 2 duplicate patterns, with no chop set get unique ids.
      */
     UtRegisterTest("DetectFastPatternTest671", DetectFastPatternTest671);
-#endif
-
-    return;
 }
+#endif

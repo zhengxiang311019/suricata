@@ -35,7 +35,7 @@ typedef struct AppLayerParser {
     uint16_t min_depth;
     uint16_t max_depth;
 
-    void *(*StateAlloc)(void);
+    void *(*StateAlloc)(void *, AppProto);
     void (*StateFree)(void *);
 
     AppLayerParserFPtr ParseTS;
@@ -45,30 +45,35 @@ typedef struct AppLayerParser {
     void *(*StateGetTx)(void *alstate, uint64_t tx_id);
     void (*StateTransactionFree)(void *, uint64_t);
 
-    int (*StateGetProgressCompletionStatus)(uint8_t direction);
+    const int complete_ts;
+    const int complete_tc;
     int (*StateGetProgress)(void *alstate, uint8_t direction);
-
-    uint32_t (*StateGetTxLogged)(void *alstate, void *tx);
-    void (*StateSetTxLogged)(void *alstate, void *tx, uint32_t logger);
 
     DetectEngineState *(*GetTxDetectState)(void *tx);
     int (*SetTxDetectState)(void *tx, DetectEngineState *);
 
-    AppLayerDecoderEvents *(*StateGetEvents)(void *, uint64_t);
+    AppLayerDecoderEvents *(*StateGetEvents)(void *);
     int (*StateGetEventInfo)(const char *event_name,
                              int *event_id, AppLayerEventType *event_type);
+    int (*StateGetEventInfoById)(int event_id, const char **event_name,
+                                  AppLayerEventType *event_type);
 
     void *(*LocalStorageAlloc)(void);
     void (*LocalStorageFree)(void *);
-
-    uint64_t (*GetTxMpmIDs)(void *tx);
-    int (*SetTxMpmIDs)(void *tx, uint64_t);
 
     FileContainer *(*StateGetFiles)(void *, uint8_t);
 
     AppLayerGetTxIterTuple (*GetTxIterator)(const uint8_t ipproto,
             const AppProto alproto, void *alstate, uint64_t min_tx_id,
             uint64_t max_tx_id, AppLayerGetTxIterState *istate);
+
+    AppLayerTxData *(*GetTxData)(void *tx);
+    bool (*ApplyTxConfig)(void *state, void *tx, int mode, AppLayerTxConfig);
+
+    uint32_t flags;
+
+    void (*Truncate)(void *state, uint8_t direction);
+
 } AppLayerParser;
 
 /**

@@ -47,7 +47,6 @@
 #define FILE_STORED     BIT_U16(11)
 #define FILE_NOTRACK    BIT_U16(12) /**< track size of file */
 #define FILE_USE_DETECT BIT_U16(13) /**< use content_inspected tracker */
-#define FILE_USE_TRACKID    BIT_U16(14) /**< File::file_track_id field is in use */
 #define FILE_HAS_GAPS   BIT_U16(15)
 
 typedef enum FileState_ {
@@ -67,8 +66,7 @@ typedef struct File_ {
     FileState state;
     StreamingBuffer *sb;
     uint64_t txid;                  /**< tx this file is part of */
-    uint32_t file_track_id;         /**< id used by protocol parser. Optional
-                                     *   only used if FILE_USE_TRACKID flag set */
+    uint32_t file_track_id;         /**< id used by protocol parser */
     uint32_t file_store_id;         /**< id used in store file name file.<id> */
     int fd;                         /**< file descriptor for filestore, not
                                         open if equal to -1 */
@@ -89,6 +87,14 @@ typedef struct File_ {
                                      *   flag is set */
     uint64_t content_stored;
     uint64_t size;
+    uint32_t inspect_window;
+    uint32_t inspect_min_size;
+    uint64_t start;
+    uint64_t end;
+
+    uint32_t *sid; /* signature id of a rule that triggered the filestore event */
+    uint32_t sid_cnt;
+    uint32_t sid_max;
 } File;
 
 typedef struct FileContainer_ {
@@ -123,9 +129,6 @@ void FileContainerAdd(FileContainer *, File *);
  *  It's the responsibility of the API user to make sure this tracker is
  *  properly updated.
  */
-File *FileOpenFile(FileContainer *, const StreamingBufferConfig *,
-        const uint8_t *name, uint16_t name_len,
-        const uint8_t *data, uint32_t data_len, uint16_t flags);
 int FileOpenFileWithId(FileContainer *, const StreamingBufferConfig *,
         uint32_t track_id, const uint8_t *name, uint16_t name_len,
         const uint8_t *data, uint32_t data_len, uint16_t flags);
@@ -165,6 +168,20 @@ int FileAppendDataById(FileContainer *, uint32_t track_id,
 int FileAppendGAPById(FileContainer *ffc, uint32_t track_id,
         const uint8_t *data, uint32_t data_len);
 
+void FileSetInspectSizes(File *file, const uint32_t win, const uint32_t min);
+
+/**
+ *  \brief Sets the offset range for a file.
+ *
+ *  \param ffc the container
+ *  \param start start offset
+ *  \param end end offset
+ *
+ *  \retval 0 ok
+ *  \retval -1 error
+ */
+int FileSetRange(FileContainer *, uint64_t start, uint64_t end);
+
 /**
  *  \brief Tag a file for storing
  *
@@ -182,15 +199,6 @@ int FileSetTx(File *, uint64_t txid);
 void FileContainerSetTx(FileContainer *ffc, uint64_t tx_id);
 
 /**
- *  \brief disable file storage for a flow
- *
- *  \param f *LOCKED* flow
- */
-void FileDisableStoring(struct Flow_ *, uint8_t);
-
-void FileDisableFilesize(Flow *f, uint8_t direction);
-
-/**
  *  \brief disable file storing for a transaction
  *
  *  \param f flow
@@ -206,21 +214,19 @@ int FileForceFilestore(void);
 void FileReassemblyDepthEnable(uint32_t size);
 uint32_t FileReassemblyDepth(void);
 
-void FileDisableMagic(Flow *f, uint8_t);
 void FileForceMagicEnable(void);
 int FileForceMagic(void);
 
-void FileDisableMd5(Flow *f, uint8_t);
 void FileForceMd5Enable(void);
 int FileForceMd5(void);
 
-void FileDisableSha1(Flow *f, uint8_t);
 void FileForceSha1Enable(void);
 int FileForceSha1(void);
 
-void FileDisableSha256(Flow *f, uint8_t);
 void FileForceSha256Enable(void);
 int FileForceSha256(void);
+
+void FileUpdateFlowFileFlags(Flow *f, uint16_t set_file_flags, uint8_t direction);
 
 void FileForceHashParseCfg(ConfNode *);
 

@@ -54,13 +54,11 @@ void TagInitCtx(void)
 
     host_tag_id = HostStorageRegister("tag", sizeof(void *), NULL, DetectTagDataListFree);
     if (host_tag_id == -1) {
-        SCLogError(SC_ERR_HOST_INIT, "Can't initiate host storage for tag");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Can't initiate host storage for tag");
     }
     flow_tag_id = FlowStorageRegister("tag", sizeof(void *), NULL, DetectTagDataListFree);
     if (flow_tag_id == -1) {
-        SCLogError(SC_ERR_FLOW_INIT, "Can't initiate flow storage for tag");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Can't initiate flow storage for tag");
     }
 }
 
@@ -75,7 +73,6 @@ void TagDestroyCtx(void)
 #ifdef DEBUG
     BUG_ON(SC_ATOMIC_GET(num_tags) != 0);
 #endif
-    SC_ATOMIC_DESTROY(num_tags);
 }
 
 /** \brief Reset the tagging engine context
@@ -185,7 +182,7 @@ int TagHashAddTag(DetectTagDataEntry *tde, Packet *p)
     SCEnter();
 
     uint8_t updated = 0;
-    uint16_t num_tags = 0;
+    uint16_t ntags = 0;
     Host *host = NULL;
 
     /* Lookup host in the hash. If it doesn't exist yet it's
@@ -218,7 +215,7 @@ int TagHashAddTag(DetectTagDataEntry *tde, Packet *p)
         DetectTagDataEntry *iter = NULL;
 
         for (iter = tag; iter != NULL; iter = iter->next) {
-            num_tags++;
+            ntags++;
             if (iter->sid == tde->sid && iter->gid == tde->gid) {
                 iter->cnt_match++;
                 /* If so, update data, unless the maximum MATCH limit is
@@ -235,7 +232,7 @@ int TagHashAddTag(DetectTagDataEntry *tde, Packet *p)
         }
 
         /* If there was no entry of this rule, append the new tde */
-        if (updated == 0 && num_tags < DETECT_TAG_MAX_TAGS) {
+        if (updated == 0 && ntags < DETECT_TAG_MAX_TAGS) {
             /* get a new tde as the one we have is on the stack */
             DetectTagDataEntry *new_tde = DetectTagDataCopy(tde);
             if (new_tde != NULL) {
@@ -244,8 +241,8 @@ int TagHashAddTag(DetectTagDataEntry *tde, Packet *p)
                 new_tde->next = tag;
                 HostSetStorageById(host, host_tag_id, new_tde);
             }
-        } else if (num_tags == DETECT_TAG_MAX_TAGS) {
-            SCLogDebug("Max tags for sessions reached (%"PRIu16")", num_tags);
+        } else if (ntags == DETECT_TAG_MAX_TAGS) {
+            SCLogDebug("Max tags for sessions reached (%"PRIu16")", ntags);
         }
     }
 
@@ -1056,6 +1053,7 @@ cleanup:
     uint8_t proto_map = FlowGetProtoMapping(f->proto);
     FlowClearMemory(f, proto_map);
     FLOW_DESTROY(f);
+    FlowFree(f);
 end:
     FlowShutdown();
     HostShutdown();
@@ -1202,6 +1200,7 @@ cleanup:
     uint8_t proto_map = FlowGetProtoMapping(f->proto);
     FlowClearMemory(f, proto_map);
     FLOW_DESTROY(f);
+    FlowFree(f);
 end:
     FlowShutdown();
     HostShutdown();
@@ -1344,6 +1343,7 @@ cleanup:
     uint8_t proto_map = FlowGetProtoMapping(f->proto);
     FlowClearMemory(f, proto_map);
     FLOW_DESTROY(f);
+    FlowFree(f);
 end:
     FlowShutdown();
     HostShutdown();
@@ -1487,6 +1487,7 @@ cleanup:
     uint8_t proto_map = FlowGetProtoMapping(f->proto);
     FlowClearMemory(f, proto_map);
     FLOW_DESTROY(f);
+    FlowFree(f);
 end:
     FlowShutdown();
     HostShutdown();

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -40,6 +40,7 @@
 
 #include "output.h"
 #include "app-layer-htp.h"
+#include "app-layer-htp-file.h"
 #include "app-layer-htp-xff.h"
 #include "app-layer.h"
 #include "app-layer-parser.h"
@@ -52,8 +53,7 @@
 #include "output-json.h"
 #include "output-json-alert.h"
 #include "output-json-http.h"
-
-#ifdef HAVE_LIBJANSSON
+#include "util-byte.h"
 
 typedef struct LogHttpFileCtx_ {
     LogFileCtx *file_ctx;
@@ -66,17 +66,22 @@ typedef struct LogHttpFileCtx_ {
 
 typedef struct JsonHttpLogThread_ {
     LogHttpFileCtx *httplog_ctx;
+    LogFileCtx *file_ctx;
     /** LogFileCtx has the pointer to the file and a mutex to allow multithreading */
     uint32_t uri_cnt;
 
     MemBuffer *buffer;
 } JsonHttpLogThread;
 
+#define MAX_SIZE_HEADER_NAME 256
+#define MAX_SIZE_HEADER_VALUE 2048
 
 #define LOG_HTTP_DEFAULT 0
 #define LOG_HTTP_EXTENDED 1
 #define LOG_HTTP_REQUEST 2 /* request field */
 #define LOG_HTTP_ARRAY 4 /* require array handling */
+#define LOG_HTTP_REQ_HEADERS 8
+#define LOG_HTTP_RES_HEADERS 16
 
 typedef enum {
     HTTP_FIELD_ACCEPT = 0,
@@ -86,7 +91,7 @@ typedef enum {
     HTTP_FIELD_ACCEPT_DATETIME,
     HTTP_FIELD_AUTHORIZATION,
     HTTP_FIELD_CACHE_CONTROL,
-    HTTP_FIELD_CONNECTION,
+    HTTP_FIELD_COOKIE,
     HTTP_FIELD_FROM,
     HTTP_FIELD_MAX_FORWARDS,
     HTTP_FIELD_ORIGIN,
@@ -103,6 +108,7 @@ typedef enum {
     HTTP_FIELD_ACCEPT_RANGES,
     HTTP_FIELD_AGE,
     HTTP_FIELD_ALLOW,
+    HTTP_FIELD_CONNECTION,
     HTTP_FIELD_CONTENT_ENCODING,
     HTTP_FIELD_CONTENT_LANGUAGE,
     HTTP_FIELD_CONTENT_LENGTH,
@@ -128,6 +134,9 @@ typedef enum {
     HTTP_FIELD_VARY,
     HTTP_FIELD_WARNING,
     HTTP_FIELD_WWW_AUTHENTICATE,
+    HTTP_FIELD_TRUE_CLIENT_IP,
+    HTTP_FIELD_ORG_SRC_IP,
+    HTTP_FIELD_X_BLUECOAT_VIA,
     HTTP_FIELD_SIZE
 } HttpField;
 
@@ -186,20 +195,17 @@ struct {
     { "vary", "vary", 0 },
     { "warning", "warning", 0 },
     { "www_authenticate", "www-authenticate", 0 },
+    { "true_client_ip", "true-client-ip", LOG_HTTP_REQUEST },
+    { "org_src_ip", "org-src-ip", LOG_HTTP_REQUEST },
+    { "x_bluecoat_via", "x-bluecoat-via", LOG_HTTP_REQUEST },
 };
 
-static void JsonHttpLogJSONBasic(json_t *js, htp_tx_t *tx)
+static void EveHttpLogJSONBasic(JsonBuilder *js, htp_tx_t *tx)
 {
-    char *c;
-
     /* hostname */
-    if (tx->request_hostname != NULL)
-    {
-        c = bstr_util_strdup_to_c(tx->request_hostname);
-        if (c != NULL) {
-            json_object_set_new(js, "hostname", SCJsonString(c));
-            SCFree(c);
-        }
+    if (tx->request_hostname != NULL) {
+        jb_set_string_from_bytes(
+                js, "hostname", bstr_ptr(tx->request_hostname), bstr_len(tx->request_hostname));
     }
 
     /* port */
@@ -208,67 +214,63 @@ static void JsonHttpLogJSONBasic(json_t *js, htp_tx_t *tx)
      * There is no connection (from the suricata point of view) between this
      * port and the TCP destination port of the flow.
      */
-    if (tx->request_port_number >= 0)
-    {
-        json_object_set_new(js, "http_port",
-                json_integer(tx->request_port_number));
+    if (tx->request_port_number >= 0) {
+        jb_set_uint(js, "http_port", tx->request_port_number);
     }
 
     /* uri */
-    if (tx->request_uri != NULL)
-    {
-        c = bstr_util_strdup_to_c(tx->request_uri);
-        if (c != NULL) {
-            json_object_set_new(js, "url", SCJsonString(c));
-            SCFree(c);
-        }
+    if (tx->request_uri != NULL) {
+        jb_set_string_from_bytes(js, "url", bstr_ptr(tx->request_uri), bstr_len(tx->request_uri));
     }
 
-    /* user agent */
-    htp_header_t *h_user_agent = NULL;
     if (tx->request_headers != NULL) {
-        h_user_agent = htp_table_get_c(tx->request_headers, "user-agent");
-    }
-    if (h_user_agent != NULL) {
-        c = bstr_util_strdup_to_c(h_user_agent->value);
-        if (c != NULL) {
-            json_object_set_new(js, "http_user_agent", SCJsonString(c));
-            SCFree(c);
+        /* user agent */
+        htp_header_t *h_user_agent = htp_table_get_c(tx->request_headers, "user-agent");
+        if (h_user_agent != NULL) {
+            jb_set_string_from_bytes(js, "http_user_agent", bstr_ptr(h_user_agent->value),
+                    bstr_len(h_user_agent->value));
         }
-    }
 
-    /* x-forwarded-for */
-    htp_header_t *h_x_forwarded_for = NULL;
-    if (tx->request_headers != NULL) {
-        h_x_forwarded_for = htp_table_get_c(tx->request_headers, "x-forwarded-for");
-    }
-    if (h_x_forwarded_for != NULL) {
-        c = bstr_util_strdup_to_c(h_x_forwarded_for->value);
-        if (c != NULL) {
-            json_object_set_new(js, "xff", json_string(c));
-            SCFree(c);
+        /* x-forwarded-for */
+        htp_header_t *h_x_forwarded_for = htp_table_get_c(tx->request_headers, "x-forwarded-for");
+        if (h_x_forwarded_for != NULL) {
+            jb_set_string_from_bytes(js, "xff", bstr_ptr(h_x_forwarded_for->value),
+                    bstr_len(h_x_forwarded_for->value));
         }
     }
 
     /* content-type */
-    htp_header_t *h_content_type = NULL;
     if (tx->response_headers != NULL) {
-        h_content_type = htp_table_get_c(tx->response_headers, "content-type");
-    }
-    if (h_content_type != NULL) {
-        char *p;
-        c = bstr_util_strdup_to_c(h_content_type->value);
-        if (c != NULL) {
-            p = strchr(c, ';');
+        htp_header_t *h_content_type = htp_table_get_c(tx->response_headers, "content-type");
+        if (h_content_type != NULL) {
+            const size_t size = bstr_len(h_content_type->value) * 2 + 1;
+            char string[size];
+            BytesToStringBuffer(bstr_ptr(h_content_type->value), bstr_len(h_content_type->value), string, size);
+            char *p = strchr(string, ';');
             if (p != NULL)
                 *p = '\0';
-            json_object_set_new(js, "http_content_type", SCJsonString(c));
-            SCFree(c);
+            jb_set_string(js, "http_content_type", string);
+        }
+        htp_header_t *h_content_range = htp_table_get_c(tx->response_headers, "content-range");
+        if (h_content_range != NULL) {
+            jb_open_object(js, "content_range");
+            jb_set_string_from_bytes(
+                    js, "raw", bstr_ptr(h_content_range->value), bstr_len(h_content_range->value));
+            HtpContentRange crparsed;
+            if (HTPParseContentRange(h_content_range->value, &crparsed) == 0) {
+                if (crparsed.start >= 0)
+                    jb_set_uint(js, "start", crparsed.start);
+                if (crparsed.end >= 0)
+                    jb_set_uint(js, "end", crparsed.end);
+                if (crparsed.size >= 0)
+                    jb_set_uint(js, "size", crparsed.size);
+            }
+            jb_close(js);
         }
     }
 }
 
-static void JsonHttpLogJSONCustom(LogHttpFileCtx *http_ctx, json_t *js, htp_tx_t *tx)
+static void EveHttpLogJSONCustom(LogHttpFileCtx *http_ctx, JsonBuilder *js, htp_tx_t *tx)
 {
     char *c;
     HttpField f;
@@ -299,9 +301,7 @@ static void JsonHttpLogJSONCustom(LogHttpFileCtx *http_ctx, json_t *js, htp_tx_t
                 if (h_field != NULL) {
                     c = bstr_util_strdup_to_c(h_field->value);
                     if (c != NULL) {
-                        json_object_set_new(js,
-                                http_fields[f].config_field,
-                                SCJsonString(c));
+                        jb_set_string(js, http_fields[f].config_field, c);
                         SCFree(c);
                     }
                 }
@@ -310,65 +310,81 @@ static void JsonHttpLogJSONCustom(LogHttpFileCtx *http_ctx, json_t *js, htp_tx_t
     }
 }
 
-static void JsonHttpLogJSONExtended(json_t *js, htp_tx_t *tx)
+static void EveHttpLogJSONExtended(JsonBuilder *js, htp_tx_t *tx)
 {
-    char *c;
-
     /* referer */
     htp_header_t *h_referer = NULL;
     if (tx->request_headers != NULL) {
         h_referer = htp_table_get_c(tx->request_headers, "referer");
     }
     if (h_referer != NULL) {
-        c = bstr_util_strdup_to_c(h_referer->value);
-        if (c != NULL) {
-            json_object_set_new(js, "http_refer", SCJsonString(c));
-            SCFree(c);
-        }
+        jb_set_string_from_bytes(
+                js, "http_refer", bstr_ptr(h_referer->value), bstr_len(h_referer->value));
     }
 
     /* method */
     if (tx->request_method != NULL) {
-        c = bstr_util_strdup_to_c(tx->request_method);
-        if (c != NULL) {
-            json_object_set_new(js, "http_method", SCJsonString(c));
-            SCFree(c);
-        }
+        jb_set_string_from_bytes(
+                js, "http_method", bstr_ptr(tx->request_method), bstr_len(tx->request_method));
     }
 
     /* protocol */
     if (tx->request_protocol != NULL) {
-        c = bstr_util_strdup_to_c(tx->request_protocol);
-        if (c != NULL) {
-            json_object_set_new(js, "protocol", SCJsonString(c));
-            SCFree(c);
-        }
+        jb_set_string_from_bytes(
+                js, "protocol", bstr_ptr(tx->request_protocol), bstr_len(tx->request_protocol));
     }
 
     /* response status */
     if (tx->response_status != NULL) {
-        c = bstr_util_strdup_to_c(tx->response_status);
-        if (c != NULL) {
-            unsigned int val = strtoul(c, NULL, 10);
-            json_object_set_new(js, "status", json_integer(val));
-            SCFree(c);
-        }
+        const size_t status_size = bstr_len(tx->response_status) * 2 + 1;
+        char status_string[status_size];
+        BytesToStringBuffer(bstr_ptr(tx->response_status), bstr_len(tx->response_status),
+                status_string, status_size);
+        unsigned int val = strtoul(status_string, NULL, 10);
+        jb_set_uint(js, "status", val);
 
         htp_header_t *h_location = htp_table_get_c(tx->response_headers, "location");
         if (h_location != NULL) {
-            c = bstr_util_strdup_to_c(h_location->value);
-            if (c != NULL) {
-                json_object_set_new(js, "redirect", SCJsonString(c));
-                SCFree(c);
-            }
+            jb_set_string_from_bytes(
+                    js, "redirect", bstr_ptr(h_location->value), bstr_len(h_location->value));
         }
     }
 
     /* length */
-    json_object_set_new(js, "length", json_integer(tx->response_message_len));
+    jb_set_uint(js, "length", tx->response_message_len);
 }
 
-static void BodyPrintableBuffer(json_t *js, HtpBody *body, const char *key)
+static void EveHttpLogJSONHeaders(JsonBuilder *js, uint32_t direction, htp_tx_t *tx)
+{
+    htp_table_t * headers = direction & LOG_HTTP_REQ_HEADERS ?
+        tx->request_headers : tx->response_headers;
+    char name[MAX_SIZE_HEADER_NAME] = {0};
+    char value[MAX_SIZE_HEADER_VALUE] = {0};
+    size_t n = htp_table_size(headers);
+    jb_open_array(js, direction & LOG_HTTP_REQ_HEADERS ? "request_headers" : "response_headers");
+    for (size_t i = 0; i < n; i++) {
+        htp_header_t * h = htp_table_get_index(headers, i, NULL);
+        if (h == NULL) {
+            continue;
+        }
+        jb_start_object(js);
+        size_t size_name = bstr_len(h->name) < MAX_SIZE_HEADER_NAME - 1 ?
+            bstr_len(h->name) : MAX_SIZE_HEADER_NAME - 1;
+        memcpy(name, bstr_ptr(h->name), size_name);
+        name[size_name] = '\0';
+        jb_set_string(js, "name", name);
+        size_t size_value = bstr_len(h->value) < MAX_SIZE_HEADER_VALUE - 1 ?
+            bstr_len(h->value) : MAX_SIZE_HEADER_VALUE - 1;
+        memcpy(value, bstr_ptr(h->value), size_value);
+        value[size_value] = '\0';
+        jb_set_string(js, "value", value);
+        jb_close(js);
+    }
+    // Close array.
+    jb_close(js);
+}
+
+static void BodyPrintableBuffer(JsonBuilder *js, HtpBody *body, const char *key)
 {
     if (body->sb != NULL && body->sb->buf != NULL) {
         uint32_t offset = 0;
@@ -386,12 +402,12 @@ static void BodyPrintableBuffer(json_t *js, HtpBody *body, const char *key)
                              sizeof(printable_buf),
                              body_data, body_data_len);
         if (offset > 0) {
-            json_object_set_new(js, key, json_string((char *)printable_buf));
+            jb_set_string(js, key, (char *)printable_buf);
         }
     }
 }
 
-void JsonHttpLogJSONBodyPrintable(json_t *js, Flow *f, uint64_t tx_id)
+void EveHttpLogJSONBodyPrintable(JsonBuilder *js, Flow *f, uint64_t tx_id)
 {
     HtpState *htp_state = (HtpState *)FlowGetAppState(f);
     if (htp_state) {
@@ -406,7 +422,7 @@ void JsonHttpLogJSONBodyPrintable(json_t *js, Flow *f, uint64_t tx_id)
     }
 }
 
-static void BodyBase64Buffer(json_t *js, HtpBody *body, const char *key)
+static void BodyBase64Buffer(JsonBuilder *js, HtpBody *body, const char *key)
 {
     if (body->sb != NULL && body->sb->buf != NULL) {
         const uint8_t *body_data;
@@ -418,15 +434,15 @@ static void BodyBase64Buffer(json_t *js, HtpBody *body, const char *key)
             return;
         }
 
-        unsigned long len = body_data_len * 2 + 1;
+        unsigned long len = BASE64_BUFFER_SIZE(body_data_len);
         uint8_t encoded[len];
         if (Base64Encode(body_data, body_data_len, encoded, &len) == SC_BASE64_OK) {
-            json_object_set_new(js, key, json_string((char *)encoded));
+            jb_set_string(js, key, (char *)encoded);
         }
     }
 }
 
-void JsonHttpLogJSONBodyBase64(json_t *js, Flow *f, uint64_t tx_id)
+void EveHttpLogJSONBodyBase64(JsonBuilder *js, Flow *f, uint64_t tx_id)
 {
     HtpState *htp_state = (HtpState *)FlowGetAppState(f);
     if (htp_state) {
@@ -442,22 +458,23 @@ void JsonHttpLogJSONBodyBase64(json_t *js, Flow *f, uint64_t tx_id)
 }
 
 /* JSON format logging */
-static void JsonHttpLogJSON(JsonHttpLogThread *aft, json_t *js, htp_tx_t *tx, uint64_t tx_id)
+static void EveHttpLogJSON(JsonHttpLogThread *aft, JsonBuilder *js, htp_tx_t *tx, uint64_t tx_id)
 {
     LogHttpFileCtx *http_ctx = aft->httplog_ctx;
-    json_t *hjs = json_object();
-    if (hjs == NULL) {
-        return;
-    }
+    jb_open_object(js, "http");
 
-    JsonHttpLogJSONBasic(hjs, tx);
+    EveHttpLogJSONBasic(js, tx);
     /* log custom fields if configured */
     if (http_ctx->fields != 0)
-        JsonHttpLogJSONCustom(http_ctx, hjs, tx);
+        EveHttpLogJSONCustom(http_ctx, js, tx);
     if (http_ctx->flags & LOG_HTTP_EXTENDED)
-        JsonHttpLogJSONExtended(hjs, tx);
+        EveHttpLogJSONExtended(js, tx);
+    if (http_ctx->flags & LOG_HTTP_REQ_HEADERS)
+        EveHttpLogJSONHeaders(js, LOG_HTTP_REQ_HEADERS, tx);
+    if (http_ctx->flags & LOG_HTTP_RES_HEADERS)
+        EveHttpLogJSONHeaders(js, LOG_HTTP_RES_HEADERS, tx);
 
-    json_object_set_new(js, "http", hjs);
+    jb_close(js);
 }
 
 static int JsonHttpLogger(ThreadVars *tv, void *thread_data, const Packet *p, Flow *f, void *alstate, void *txptr, uint64_t tx_id)
@@ -467,18 +484,17 @@ static int JsonHttpLogger(ThreadVars *tv, void *thread_data, const Packet *p, Fl
     htp_tx_t *tx = txptr;
     JsonHttpLogThread *jhl = (JsonHttpLogThread *)thread_data;
 
-    json_t *js = CreateJSONHeaderWithTxId(p, LOG_DIR_FLOW, "http", tx_id);
+    JsonBuilder *js = CreateEveHeaderWithTxId(p, LOG_DIR_FLOW, "http", NULL, tx_id);
     if (unlikely(js == NULL))
         return TM_ECODE_OK;
-
-    JsonAddCommonOptions(&jhl->httplog_ctx->cfg, p, f, js);
+    EveAddCommonOptions(&jhl->httplog_ctx->cfg, p, f, js);
 
     SCLogDebug("got a HTTP request and now logging !!");
 
     /* reset */
     MemBufferReset(jhl->buffer);
 
-    JsonHttpLogJSON(jhl, js, tx, tx_id);
+    EveHttpLogJSON(jhl, js, tx, tx_id);
     HttpXFFCfg *xff_cfg = jhl->httplog_ctx->xff_cfg != NULL ?
         jhl->httplog_ctx->xff_cfg : jhl->httplog_ctx->parent_xff_cfg;
 
@@ -491,113 +507,38 @@ static int JsonHttpLogger(ThreadVars *tv, void *thread_data, const Packet *p, Fl
 
         if (have_xff_ip) {
             if (xff_cfg->flags & XFF_EXTRADATA) {
-                json_object_set_new(js, "xff", json_string(buffer));
+                jb_set_string(js, "xff", buffer);
             }
             else if (xff_cfg->flags & XFF_OVERWRITE) {
                 if (p->flowflags & FLOW_PKT_TOCLIENT) {
-                    json_object_set(js, "dest_ip", json_string(buffer));
+                    jb_set_string(js, "dest_ip", buffer);
                 } else {
-                    json_object_set(js, "src_ip", json_string(buffer));
+                    jb_set_string(js, "src_ip", buffer);
                 }
             }
         }
     }
 
-    OutputJSONBuffer(js, jhl->httplog_ctx->file_ctx, &jhl->buffer);
-    json_object_del(js, "http");
-
-    json_object_clear(js);
-    json_decref(js);
+    OutputJsonBuilderBuffer(js, jhl->file_ctx, &jhl->buffer);
+    jb_free(js);
 
     SCReturnInt(TM_ECODE_OK);
 }
 
-json_t *JsonHttpAddMetadata(const Flow *f, uint64_t tx_id)
+bool EveHttpAddMetadata(const Flow *f, uint64_t tx_id, JsonBuilder *js)
 {
     HtpState *htp_state = (HtpState *)FlowGetAppState(f);
     if (htp_state) {
         htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP, htp_state, tx_id);
 
         if (tx) {
-            json_t *hjs = json_object();
-            if (unlikely(hjs == NULL))
-                return NULL;
-
-            JsonHttpLogJSONBasic(hjs, tx);
-            JsonHttpLogJSONExtended(hjs, tx);
-            return hjs;
+            EveHttpLogJSONBasic(js, tx);
+            EveHttpLogJSONExtended(js, tx);
+            return true;
         }
     }
 
-    return NULL;
-}
-
-static void OutputHttpLogDeinit(OutputCtx *output_ctx)
-{
-    LogHttpFileCtx *http_ctx = output_ctx->data;
-    LogFileCtx *logfile_ctx = http_ctx->file_ctx;
-    LogFileFreeCtx(logfile_ctx);
-    if (http_ctx->xff_cfg) {
-        SCFree(http_ctx->xff_cfg);
-    }
-    SCFree(http_ctx);
-    SCFree(output_ctx);
-}
-
-#define DEFAULT_LOG_FILENAME "http.json"
-static OutputInitResult OutputHttpLogInit(ConfNode *conf)
-{
-    OutputInitResult result = { NULL, false };
-    LogFileCtx *file_ctx = LogFileNewCtx();
-    if(file_ctx == NULL) {
-        SCLogError(SC_ERR_HTTP_LOG_GENERIC, "couldn't create new file_ctx");
-        return result;
-    }
-
-    if (SCConfLogOpenGeneric(conf, file_ctx, DEFAULT_LOG_FILENAME, 1) < 0) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-
-    LogHttpFileCtx *http_ctx = SCMalloc(sizeof(LogHttpFileCtx));
-    if (unlikely(http_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-
-    OutputCtx *output_ctx = SCCalloc(1, sizeof(OutputCtx));
-    if (unlikely(output_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        SCFree(http_ctx);
-        return result;
-    }
-
-    http_ctx->file_ctx = file_ctx;
-    http_ctx->flags = LOG_HTTP_DEFAULT;
-
-    if (conf) {
-        const char *extended = ConfNodeLookupChildValue(conf, "extended");
-
-        if (extended != NULL) {
-            if (ConfValIsTrue(extended)) {
-                http_ctx->flags = LOG_HTTP_EXTENDED;
-            }
-        }
-    }
-    http_ctx->xff_cfg = SCCalloc(1, sizeof(HttpXFFCfg));
-    if (http_ctx->xff_cfg != NULL) {
-        HttpXFFGetCfg(conf, http_ctx->xff_cfg);
-    }
-
-    output_ctx->data = http_ctx;
-    output_ctx->DeInit = OutputHttpLogDeinit;
-
-    /* enable the logger for the app layer */
-    AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_HTTP);
-
-    result.ctx = output_ctx;
-    result.ok = true;
-    return result;
+    return false;
 }
 
 static void OutputHttpLogDeinitSub(OutputCtx *output_ctx)
@@ -661,6 +602,18 @@ static OutputInitResult OutputHttpLogInitSub(ConfNode *conf, OutputCtx *parent_c
                 }
             }
         }
+        const char *all_headers = ConfNodeLookupChildValue(
+                conf, "dump-all-headers");
+        if (all_headers != NULL) {
+            if (strncmp(all_headers, "both", 4) == 0) {
+                http_ctx->flags |= LOG_HTTP_REQ_HEADERS;
+                http_ctx->flags |= LOG_HTTP_RES_HEADERS;
+            } else if (strncmp(all_headers, "request", 7) == 0) {
+                http_ctx->flags |= LOG_HTTP_REQ_HEADERS;
+            } else if (strncmp(all_headers, "response", 8) == 0) {
+                http_ctx->flags |= LOG_HTTP_RES_HEADERS;
+            }
+        }
     }
 
     if (conf != NULL && ConfNodeLookupChild(conf, "xff") != NULL) {
@@ -683,32 +636,40 @@ static OutputInitResult OutputHttpLogInitSub(ConfNode *conf, OutputCtx *parent_c
     return result;
 }
 
-#define OUTPUT_BUFFER_SIZE 65535
 static TmEcode JsonHttpLogThreadInit(ThreadVars *t, const void *initdata, void **data)
 {
-    JsonHttpLogThread *aft = SCMalloc(sizeof(JsonHttpLogThread));
+    JsonHttpLogThread *aft = SCCalloc(1, sizeof(JsonHttpLogThread));
     if (unlikely(aft == NULL))
         return TM_ECODE_FAILED;
-    memset(aft, 0, sizeof(JsonHttpLogThread));
 
     if(initdata == NULL)
     {
         SCLogDebug("Error getting context for EveLogHTTP.  \"initdata\" argument NULL");
-        SCFree(aft);
-        return TM_ECODE_FAILED;
+        goto error_exit;
     }
 
-    /* Use the Ouptut Context (file pointer and mutex) */
+    /* Use the Output Context (file pointer and mutex) */
     aft->httplog_ctx = ((OutputCtx *)initdata)->data; //TODO
 
-    aft->buffer = MemBufferCreateNew(OUTPUT_BUFFER_SIZE);
+    aft->buffer = MemBufferCreateNew(JSON_OUTPUT_BUFFER_SIZE);
     if (aft->buffer == NULL) {
-        SCFree(aft);
-        return TM_ECODE_FAILED;
+        goto error_exit;
+    }
+
+    aft->file_ctx = LogFileEnsureExists(aft->httplog_ctx->file_ctx, t->id);
+    if (!aft->file_ctx) {
+        goto error_exit;
     }
 
     *data = (void *)aft;
     return TM_ECODE_OK;
+
+error_exit:
+    if (aft->buffer != NULL) {
+        MemBufferFree(aft->buffer);
+    }
+    SCFree(aft);
+    return TM_ECODE_FAILED;
 }
 
 static TmEcode JsonHttpLogThreadDeinit(ThreadVars *t, void *data)
@@ -728,21 +689,8 @@ static TmEcode JsonHttpLogThreadDeinit(ThreadVars *t, void *data)
 
 void JsonHttpLogRegister (void)
 {
-    /* register as separate module */
-    OutputRegisterTxModule(LOGGER_JSON_HTTP, "JsonHttpLog", "http-json-log",
-        OutputHttpLogInit, ALPROTO_HTTP, JsonHttpLogger, JsonHttpLogThreadInit,
-        JsonHttpLogThreadDeinit, NULL);
-
-    /* also register as child of eve-log */
+    /* register as child of eve-log */
     OutputRegisterTxSubModule(LOGGER_JSON_HTTP, "eve-log", "JsonHttpLog",
         "eve-log.http", OutputHttpLogInitSub, ALPROTO_HTTP, JsonHttpLogger,
         JsonHttpLogThreadInit, JsonHttpLogThreadDeinit, NULL);
 }
-
-#else
-
-void JsonHttpLogRegister (void)
-{
-}
-
-#endif

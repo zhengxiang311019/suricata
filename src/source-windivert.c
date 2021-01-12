@@ -347,14 +347,12 @@ TmEcode ReceiveWinDivertThreadDeinit(ThreadVars *, void *);
 void ReceiveWinDivertThreadExitStats(ThreadVars *, void *);
 
 /* Verdict functions */
-TmEcode VerdictWinDivert(ThreadVars *, Packet *, void *, PacketQueue *,
-                         PacketQueue *);
+TmEcode VerdictWinDivert(ThreadVars *, Packet *, void *);
 TmEcode VerdictWinDivertThreadInit(ThreadVars *, const void *, void **);
 TmEcode VerdictWinDivertThreadDeinit(ThreadVars *, void *);
 
 /* Decode functions */
-TmEcode DecodeWinDivert(ThreadVars *, Packet *, void *, PacketQueue *,
-                        PacketQueue *);
+TmEcode DecodeWinDivert(ThreadVars *, Packet *, void *);
 TmEcode DecodeWinDivertThreadInit(ThreadVars *, const void *, void **);
 TmEcode DecodeWinDivertThreadDeinit(ThreadVars *, void *);
 
@@ -500,7 +498,6 @@ static TmEcode WinDivertRecvHelper(ThreadVars *tv, WinDivertThreadVars *wd_tv)
      * or push it to a packet pool. So processing time can vary.
      */
     if (TmThreadsSlotProcessPkt(tv, wd_tv->slot, p) != TM_ECODE_OK) {
-        TmqhOutputPacketpool(tv, p);
         SCReturnInt(TM_ECODE_FAILED);
     }
 
@@ -734,8 +731,7 @@ void ReceiveWinDivertThreadExitStats(ThreadVars *tv, void *data)
 /**
  * \brief WinDivert verdict module packet entry function
  */
-TmEcode VerdictWinDivert(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq,
-                         PacketQueue *postpq)
+TmEcode VerdictWinDivert(ThreadVars *tv, Packet *p, void *data)
 {
     SCEnter();
 
@@ -859,8 +855,7 @@ TmEcode VerdictWinDivertThreadDeinit(ThreadVars *tv, void *data)
  * to differentiate the two, so instead we must check the version and go
  * from there.
  */
-TmEcode DecodeWinDivert(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq,
-                        PacketQueue *postpq)
+TmEcode DecodeWinDivert(ThreadVars *tv, Packet *p, void *data)
 {
     SCEnter();
 
@@ -868,21 +863,16 @@ TmEcode DecodeWinDivert(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq,
     IPV6Hdr *ip6h = (IPV6Hdr *)GET_PKT_DATA(p);
     DecodeThreadVars *d_tv = (DecodeThreadVars *)data;
 
-    /* XXX HACK: flow timeout can call us for injected pseudo packets
-     *           see bug:
-     * https://redmine.openinfosecfoundation.org/issues/1107
-     */
-    if (PKT_IS_PSEUDOPKT(p))
-        SCReturnInt(TM_ECODE_OK);
+    BUG_ON(PKT_IS_PSEUDOPKT(p));
 
     DecodeUpdatePacketCounters(tv, d_tv, p);
 
     if (IPV4_GET_RAW_VER(ip4h) == 4) {
         SCLogDebug("IPv4 packet");
-        DecodeIPV4(tv, d_tv, p, GET_PKT_DATA(p), GET_PKT_LEN(p), pq);
+        DecodeIPV4(tv, d_tv, p, GET_PKT_DATA(p), GET_PKT_LEN(p));
     } else if (IPV6_GET_RAW_VER(ip6h) == 6) {
         SCLogDebug("IPv6 packet");
-        DecodeIPV6(tv, d_tv, p, GET_PKT_DATA(p), GET_PKT_LEN(p), pq);
+        DecodeIPV6(tv, d_tv, p, GET_PKT_DATA(p), GET_PKT_LEN(p));
     } else {
         SCLogDebug("packet unsupported by WinDivert, first byte: %02x",
                    *GET_PKT_DATA(p));

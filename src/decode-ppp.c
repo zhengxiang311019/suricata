@@ -40,7 +40,8 @@
 #include "util-unittest.h"
 #include "util-debug.h"
 
-int DecodePPP(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt, uint32_t len, PacketQueue *pq)
+int DecodePPP(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
+        const uint8_t *pkt, uint32_t len)
 {
     StatsIncr(tv, dtv->counter_ppp);
 
@@ -70,7 +71,7 @@ int DecodePPP(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt, ui
             }
 
             if (likely(IPV4_GET_RAW_VER((IPV4Hdr *)(pkt + PPP_HEADER_LEN)) == 4)) {
-                return DecodeIPV4(tv, dtv, p, pkt + PPP_HEADER_LEN, len - PPP_HEADER_LEN, pq);
+                return DecodeIPV4(tv, dtv, p, pkt + PPP_HEADER_LEN, len - PPP_HEADER_LEN);
             } else
                 return TM_ECODE_FAILED;
             break;
@@ -85,7 +86,7 @@ int DecodePPP(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt, ui
                 return TM_ECODE_FAILED;
             }
 
-            return DecodeIPV4(tv, dtv, p, pkt + PPP_HEADER_LEN, len - PPP_HEADER_LEN, pq);
+            return DecodeIPV4(tv, dtv, p, pkt + PPP_HEADER_LEN, len - PPP_HEADER_LEN);
 
             /* PPP IPv6 was not tested */
         case PPP_IPV6:
@@ -98,7 +99,7 @@ int DecodePPP(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt, ui
                 return TM_ECODE_FAILED;
             }
 
-            return DecodeIPV6(tv, dtv, p, pkt + PPP_HEADER_LEN, len - PPP_HEADER_LEN, pq);
+            return DecodeIPV6(tv, dtv, p, pkt + PPP_HEADER_LEN, len - PPP_HEADER_LEN);
 
         case PPP_VJ_COMP:
         case PPP_IPX:
@@ -158,7 +159,7 @@ static int DecodePPPtest01 (void)
     memset(&tv, 0, sizeof(ThreadVars));
     memset(&dtv, 0, sizeof(DecodeThreadVars));
 
-    DecodePPP(&tv, &dtv, p, raw_ppp, sizeof(raw_ppp), NULL);
+    DecodePPP(&tv, &dtv, p, raw_ppp, sizeof(raw_ppp));
 
     /* Function my returns here with expected value */
 
@@ -191,7 +192,7 @@ static int DecodePPPtest02 (void)
     memset(&tv, 0, sizeof(ThreadVars));
     memset(&dtv, 0, sizeof(DecodeThreadVars));
 
-    DecodePPP(&tv, &dtv, p, raw_ppp, sizeof(raw_ppp), NULL);
+    DecodePPP(&tv, &dtv, p, raw_ppp, sizeof(raw_ppp));
 
     /* Function must returns here */
 
@@ -228,7 +229,7 @@ static int DecodePPPtest03 (void)
 
     FlowInitConfig(FLOW_QUIET);
 
-    DecodePPP(&tv, &dtv, p, raw_ppp, sizeof(raw_ppp), NULL);
+    DecodePPP(&tv, &dtv, p, raw_ppp, sizeof(raw_ppp));
 
     FlowShutdown();
 
@@ -286,7 +287,7 @@ static int DecodePPPtest04 (void)
 
     FlowInitConfig(FLOW_QUIET);
 
-    DecodePPP(&tv, &dtv, p, raw_ppp, sizeof(raw_ppp), NULL);
+    DecodePPP(&tv, &dtv, p, raw_ppp, sizeof(raw_ppp));
 
     FlowShutdown();
 

@@ -17,8 +17,10 @@
 
 use std::cmp::min;
 
-use dhcp::dhcp::*;
-use nom::*;
+use crate::dhcp::dhcp::*;
+use nom::IResult;
+use nom::combinator::rest;
+use nom::number::streaming::{be_u8, be_u16, be_u32};
 
 pub struct DHCPMessage {
     pub header: DHCPHeader,
@@ -120,10 +122,10 @@ named!(pub parse_header<DHCPHeader>,
 
 named!(pub parse_clientid_option<DHCPOption>,
        do_parse!(
-           code: be_u8 >>
-           len: be_u8 >>
-           htype: be_u8 >>
-           data: take!(len - 1) >>    
+           code:   be_u8 >>
+           len: verify!(be_u8, |&v| v > 1) >>
+           _htype: be_u8 >>
+           data:   take!(len - 1) >>
                (
                    DHCPOption{
                        code: code,
@@ -139,8 +141,8 @@ named!(pub parse_clientid_option<DHCPOption>,
 
 named!(pub parse_address_time_option<DHCPOption>,
        do_parse!(
-           code: be_u8 >>
-           len: be_u8 >>
+           code:    be_u8 >>
+           _len:    be_u8 >>
            seconds: be_u32 >>
                (
                    DHCPOption{
@@ -169,8 +171,8 @@ named!(pub parse_generic_option<DHCPOption>,
            ))
 );
 
-/// Parse a single DHCP option. When option 255 (END) is parsed, the remaining
-/// data will be consumed.
+// Parse a single DHCP option. When option 255 (END) is parsed, the remaining
+// data will be consumed.
 named!(pub parse_option<DHCPOption>,
        switch!(peek!(be_u8),
                // End of options case. We consume the rest of the data
@@ -190,20 +192,20 @@ named!(pub parse_option<DHCPOption>,
                _ => call!(parse_generic_option)
        ));
 
-/// Parse and return all the options. Upon the end of option indicator
-/// all the data will be consumed.
-named!(pub parse_all_options<Vec<DHCPOption>>, many0!(call!(parse_option)));
+// Parse and return all the options. Upon the end of option indicator
+// all the data will be consumed.
+named!(pub parse_all_options<Vec<DHCPOption>>, many0!(complete!(call!(parse_option))));
 
 pub fn dhcp_parse(input: &[u8]) -> IResult<&[u8], DHCPMessage> {
     match parse_header(input) {
-        IResult::Done(rem, header) => {
+        Ok((rem, header)) => {
             let mut options = Vec::new();
             let mut next = rem;
-            let mut malformed_options = false;
+            let malformed_options = false;
             let mut truncated_options = false;
             loop {
                 match parse_option(next) {
-                    IResult::Done(rem, option) => {
+                    Ok((rem, option)) => {
                         let done = option.code == DHCP_OPT_END;
                         options.push(option);
                         next = rem;
@@ -211,12 +213,8 @@ pub fn dhcp_parse(input: &[u8]) -> IResult<&[u8], DHCPMessage> {
                             break;
                         }
                     }
-                    IResult::Incomplete(_) => {
+                    Err(_) => {
                         truncated_options = true;
-                        break;
-                    }
-                    IResult::Error(_) => {
-                        malformed_options = true;
                         break;
                     }
                 }
@@ -227,21 +225,18 @@ pub fn dhcp_parse(input: &[u8]) -> IResult<&[u8], DHCPMessage> {
                 malformed_options: malformed_options,
                 truncated_options: truncated_options,
             };
-            return IResult::Done(next, message);
+            return Ok((next, message));
         }
-        IResult::Error(err) => {
-            return IResult::Error(err);
-        }
-        IResult::Incomplete(incomplete) => {
-            return IResult::Incomplete(incomplete);
+        Err(err) => {
+            return Err(err);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use dhcp::dhcp::*;
-    use dhcp::parser::*;
+    use crate::dhcp::dhcp::*;
+    use crate::dhcp::parser::*;
 
     #[test]
     fn test_parse_discover() {
@@ -249,7 +244,7 @@ mod tests {
         let payload = &pcap[24 + 16 + 42..];
 
         match dhcp_parse(payload) {
-            IResult::Done(_rem, message) => {
+            Ok((_rem, message)) => {
                 let header = message.header;
                 assert_eq!(header.opcode, BOOTP_REQUEST);
                 assert_eq!(header.htype, 1);
@@ -284,4 +279,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_parse_client_id_too_short() {
+        // Length field of 0.
+        let buf: &[u8] = &[
+            0x01,
+            0x00, // Length of 0.
+            0x01,
+            0x01, // Junk data start here.
+            0x02,
+            0x03,
+        ];
+        let r = parse_clientid_option(buf);
+        assert!(r.is_err());
+
+        // Length field of 1.
+        let buf: &[u8] = &[
+            0x01,
+            0x01, // Length of 1.
+            0x01,
+            0x41,
+        ];
+        let r = parse_clientid_option(buf);
+        assert!(r.is_err());
+
+        // Length field of 2 -- OK.
+        let buf: &[u8] = &[
+            0x01,
+            0x02, // Length of 2.
+            0x01,
+            0x41,
+        ];
+        let r = parse_clientid_option(buf);
+        match r {
+            Ok((rem, _)) => { assert_eq!(rem.len(), 0); },
+            _ => { panic!("failed"); }
+        }
+    }
 }

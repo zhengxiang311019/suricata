@@ -24,7 +24,6 @@
 #ifndef __OUTPUT_JSON_EMAIL_COMMON_H__
 #define __OUTPUT_JSON_EMAIL_COMMON_H__
 
-#ifdef HAVE_LIBJANSSON
 typedef struct OutputJsonEmailCtx_ {
     LogFileCtx *file_ctx;
     uint32_t flags; /** Store mode */
@@ -33,14 +32,14 @@ typedef struct OutputJsonEmailCtx_ {
 } OutputJsonEmailCtx;
 
 typedef struct JsonEmailLogThread_ {
+    LogFileCtx *file_ctx;
     OutputJsonEmailCtx *emaillog_ctx;
     MemBuffer *buffer;
 } JsonEmailLogThread;
 
-TmEcode JsonEmailLogJson(JsonEmailLogThread *aft, json_t *js, const Packet *p, Flow *f, void *state, void *vtx, uint64_t tx_id);
-json_t *JsonEmailAddMetadata(const Flow *f, uint32_t tx_id);
+TmEcode EveEmailLogJson(JsonEmailLogThread *aft, JsonBuilder *js, const Packet *p, Flow *f, void *state, void *vtx, uint64_t tx_id);
+bool EveEmailAddMetadata(const Flow *f, uint32_t tx_id, JsonBuilder *js);
 
 void OutputEmailInitConf(ConfNode *conf, OutputJsonEmailCtx *email_ctx);
 
-#endif /* HAVE_LIBJANSSON */
 #endif /* __OUTPUT_JSON_EMAIL_COMMON_H__ */

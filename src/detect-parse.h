@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -39,10 +39,18 @@ enum {
     SIG_DIREC_DST
 };
 
+typedef struct DetectParseRegex_ {
+    pcre *regex;
+    pcre_extra *study;
+#ifdef PCRE_HAVE_JIT_EXEC
+    pcre_jit_stack *jit_stack;
+#endif
+    struct DetectParseRegex_ *next;
+} DetectParseRegex;
+
 /* prototypes */
-int SigParse(DetectEngineCtx *, Signature *, const char *, uint8_t);
 Signature *SigAlloc(void);
-void SigFree(Signature *s);
+void SigFree(DetectEngineCtx *de_ctx, Signature *s);
 Signature *SigInit(DetectEngineCtx *, const char *sigstr);
 Signature *SigInitReal(DetectEngineCtx *, const char *);
 SigMatchData* SigMatchList2DataArray(SigMatch *head);
@@ -60,8 +68,14 @@ int DetectEngineContentModifierBufferSetup(DetectEngineCtx *de_ctx,
         Signature *s, const char *arg, int sm_type, int sm_list,
         AppProto alproto);
 
+bool SigMatchSilentErrorEnabled(const DetectEngineCtx *de_ctx,
+        const enum DetectKeywordId id);
+bool SigMatchStrictEnabled(const enum DetectKeywordId id);
+
 const char *DetectListToHumanString(int list);
 const char *DetectListToString(int list);
+
+void SigTableApplyStrictCommandlineOption(const char *str);
 
 SigMatch *DetectGetLastSM(const Signature *);
 SigMatch *DetectGetLastSMFromMpmLists(const DetectEngineCtx *de_ctx, const Signature *s);
@@ -69,20 +83,27 @@ SigMatch *DetectGetLastSMFromLists(const Signature *s, ...);
 SigMatch *DetectGetLastSMByListPtr(const Signature *s, SigMatch *sm_list, ...);
 SigMatch *DetectGetLastSMByListId(const Signature *s, int list_id, ...);
 
-int DetectSignatureAddTransform(Signature *s, int transform);
-int DetectSignatureSetAppProto(Signature *s, AppProto alproto);
+int DetectSignatureAddTransform(Signature *s, int transform, void *options);
+int WARN_UNUSED DetectSignatureSetAppProto(Signature *s, AppProto alproto);
 
 /* parse regex setup and free util funcs */
 
-void DetectSetupParseRegexes(const char *parse_str,
-                             pcre **parse_regex,
-                             pcre_extra **parse_regex_study);
-void DetectParseRegexAddToFreeList(pcre *regex, pcre_extra *study);
+bool DetectSetupParseRegexesOpts(const char *parse_str, DetectParseRegex *parse_regex, int opts);
+void DetectSetupParseRegexes(const char *parse_str, DetectParseRegex *parse_regex);
+void DetectParseRegexAddToFreeList(DetectParseRegex *parse_regex);
 void DetectParseFreeRegexes(void);
+void DetectParseFreeRegex(DetectParseRegex *r);
 
-#ifdef AFLFUZZ_RULES
-int RuleParseDataFromFile(char *filename);
-#endif
+/* parse regex exec */
+int DetectParsePcreExec(DetectParseRegex *parse_regex, const char *str,
+                   int start_offset, int options,
+                   int *ovector, int ovector_size);
+int DetectParsePcreExecLen(DetectParseRegex *parse_regex, const char *str,
+                   int str_len, int start_offset, int options,
+                   int *ovector, int ovector_size);
+
+/* typical size of ovector */
+#define MAX_SUBSTRINGS 30
 
 #endif /* __DETECT_PARSE_H__ */
 

@@ -38,24 +38,17 @@
 #include "detect-engine-content-inspection.h"
 #include "detect-template-rust-buffer.h"
 #include "app-layer-parser.h"
+#include "rust.h"
 
-#ifndef HAVE_RUST
-
-void DetectTemplateRustBufferRegister(void)
-{
-}
-
-#else
-
-#include "rust-applayertemplate-template-gen.h"
 
 static int DetectTemplateRustBufferSetup(DetectEngineCtx *, Signature *,
     const char *);
-static int DetectEngineInspectTemplateRustBuffer(ThreadVars *tv,
-    DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-    const Signature *s, const SigMatchData *smd,
-    Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id);
+static int DetectEngineInspectTemplateRustBuffer(DetectEngineCtx *de_ctx,
+        DetectEngineThreadCtx *det_ctx, const struct DetectEngineAppInspectionEngine_ *engine,
+        const Signature *s, Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id);
+#ifdef UNITTESTS
 static void DetectTemplateRustBufferRegisterTests(void);
+#endif
 static int g_template_rust_id = 0;
 
 void DetectTemplateRustBufferRegister(void)
@@ -71,18 +64,17 @@ void DetectTemplateRustBufferRegister(void)
         "Template content modififier to match on the template buffers";
     sigmatch_table[DETECT_AL_TEMPLATE_RUST_BUFFER].Setup =
         DetectTemplateRustBufferSetup;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_AL_TEMPLATE_RUST_BUFFER].RegisterTests =
         DetectTemplateRustBufferRegisterTests;
-
+#endif
     sigmatch_table[DETECT_AL_TEMPLATE_RUST_BUFFER].flags |= SIGMATCH_NOOPT;
 
     /* register inspect engines */
-    DetectAppLayerInspectEngineRegister("template_rust_buffer",
-            ALPROTO_TEMPLATE, SIG_FLAG_TOSERVER, 0,
-            DetectEngineInspectTemplateRustBuffer);
-    DetectAppLayerInspectEngineRegister("template_rust_buffer",
-            ALPROTO_TEMPLATE, SIG_FLAG_TOCLIENT, 0,
-            DetectEngineInspectTemplateRustBuffer);
+    DetectAppLayerInspectEngineRegister2("template_rust_buffer", ALPROTO_TEMPLATE,
+            SIG_FLAG_TOSERVER, 0, DetectEngineInspectTemplateRustBuffer, NULL);
+    DetectAppLayerInspectEngineRegister2("template_rust_buffer", ALPROTO_TEMPLATE,
+            SIG_FLAG_TOCLIENT, 0, DetectEngineInspectTemplateRustBuffer, NULL);
 
     g_template_rust_id = DetectBufferTypeGetByName("template_rust_buffer");
 
@@ -100,25 +92,24 @@ static int DetectTemplateRustBufferSetup(DetectEngineCtx *de_ctx, Signature *s,
     return 0;
 }
 
-static int DetectEngineInspectTemplateRustBuffer(ThreadVars *tv,
-    DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-    const Signature *s, const SigMatchData *smd,
-    Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
+static int DetectEngineInspectTemplateRustBuffer(DetectEngineCtx *de_ctx,
+        DetectEngineThreadCtx *det_ctx, const struct DetectEngineAppInspectionEngine_ *engine,
+        const Signature *s, Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
 {
     int ret = 0;
     const uint8_t *data = NULL;
     uint32_t data_len = 0;
 
     if (flags & STREAM_TOSERVER) {
-        rs_template_get_request_buffer(txv, (uint8_t **)&data, &data_len);
+        rs_template_get_request_buffer(txv, &data, &data_len);
     } else if (flags & STREAM_TOCLIENT) {
-        rs_template_get_response_buffer(txv, (uint8_t **)&data, &data_len);
+        rs_template_get_response_buffer(txv, &data, &data_len);
     }
 
     if (data != NULL) {
-        ret = DetectEngineContentInspection(de_ctx, det_ctx, s, smd,
-            f, (uint8_t *)data, data_len, 0, DETECT_CI_FLAGS_SINGLE,
-            DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE, NULL);
+        ret = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
+                (uint8_t *)data, data_len, 0, DETECT_CI_FLAGS_SINGLE,
+                DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
     }
 
     SCLogNotice("Returning %d.", ret);
@@ -213,14 +204,9 @@ static int DetectTemplateRustBufferTest(void)
     PASS;
 }
 
-#endif
-
 static void DetectTemplateRustBufferRegisterTests(void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("DetectTemplateRustBufferTest",
         DetectTemplateRustBufferTest);
-#endif /* UNITTESTS */
 }
-
-#endif
+#endif /* UNITTESTS */

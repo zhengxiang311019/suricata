@@ -1,4 +1,4 @@
-/* Copyright (C) 2017 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -36,12 +36,13 @@
  */
 #define PARSE_REGEX  "^\\s*(src_ip|dest_ip)\\s*$"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
 /* Prototypes of functions registered in DetectTargetRegister below */
 static int DetectTargetSetup (DetectEngineCtx *, Signature *, const char *);
+#ifdef UNITTESTS
 static void DetectTargetRegisterTests (void);
+#endif
 
 /**
  * \brief Registration function for target keyword
@@ -53,7 +54,7 @@ void DetectTargetRegister(void) {
     /* description: listed in "suricata --list-keywords=all" */
     sigmatch_table[DETECT_TARGET].desc = "indicate to output module which side is the target of the attack";
     /* link to further documentation of the keyword. Normally on the Suricata redmine/wiki */
-    sigmatch_table[DETECT_TARGET].url =  DOC_URL DOC_VERSION "/rules/meta.html#target";
+    sigmatch_table[DETECT_TARGET].url =  "/rules/meta.html#target";
     /* match function is called when the signature is inspected on a packet */
     sigmatch_table[DETECT_TARGET].Match = NULL;
     /* setup function is called during signature parsing, when the target
@@ -63,10 +64,11 @@ void DetectTargetRegister(void) {
      * shutdown, but also during rule reloads. */
     sigmatch_table[DETECT_TARGET].Free = NULL;
     /* registers unittests into the system */
+#ifdef UNITTESTS
     sigmatch_table[DETECT_TARGET].RegisterTests = DetectTargetRegisterTests;
-
+#endif
     /* set up the PCRE for keyword parsing */
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 /**
@@ -79,13 +81,11 @@ void DetectTargetRegister(void) {
  */
 static int DetectTargetParse(Signature *s, const char *targetstr)
 {
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
     char value[10];
 
-    ret = pcre_exec(parse_regex, parse_regex_study,
-                    targetstr, strlen(targetstr), 0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, targetstr, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 1) {
         SCLogError(SC_ERR_PCRE_MATCH, "pcre_exec parse error, ret %" PRId32 ", string %s", ret, targetstr);
         return -1;
@@ -154,14 +154,12 @@ static int DetectTargetSignatureTest01(void)
     PASS;
 }
 
-#endif /* UNITTESTS */
-
 /**
  * \brief this function registers unit tests for DetectTarget
  */
-void DetectTargetRegisterTests(void) {
-#ifdef UNITTESTS
+static void DetectTargetRegisterTests(void)
+{
     UtRegisterTest("DetectTargetSignatureTest01",
                    DetectTargetSignatureTest01);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

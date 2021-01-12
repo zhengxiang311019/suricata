@@ -40,8 +40,13 @@
         (f)->sp = 0; \
         (f)->dp = 0; \
         (f)->proto = 0; \
-        SC_ATOMIC_INIT((f)->flow_state); \
-        SC_ATOMIC_INIT((f)->use_cnt); \
+        (f)->livedev = NULL; \
+        (f)->timeout_at = 0; \
+        (f)->timeout_policy = 0; \
+        (f)->vlan_idx = 0; \
+        (f)->next = NULL; \
+        (f)->flow_state = 0; \
+        (f)->use_cnt = 0; \
         (f)->tenant_id = 0; \
         (f)->parent_id = 0; \
         (f)->probing_parser_toserver_alproto_masks = 0; \
@@ -60,22 +65,19 @@
         (f)->alproto_orig = 0; \
         (f)->alproto_expect = 0; \
         (f)->de_ctx_version = 0; \
-        (f)->thread_id = 0; \
+        (f)->thread_id[0] = 0; \
+        (f)->thread_id[1] = 0; \
         (f)->alparser = NULL; \
         (f)->alstate = NULL; \
         (f)->sgh_toserver = NULL; \
         (f)->sgh_toclient = NULL; \
         (f)->flowvar = NULL; \
-        (f)->hnext = NULL; \
-        (f)->hprev = NULL; \
-        (f)->lnext = NULL; \
-        (f)->lprev = NULL; \
         RESET_COUNTERS((f)); \
     } while (0)
 
 /** \brief macro to recycle a flow before it goes into the spare queue for reuse.
  *
- *  Note that the lnext, lprev, hnext, hprev fields are untouched, those are
+ *  Note that the lnext, lprev, hnext fields are untouched, those are
  *  managed by the queueing code. Same goes for fb (FlowBucket ptr) field.
  */
 #define FLOW_RECYCLE(f) do { \
@@ -83,8 +85,14 @@
         (f)->sp = 0; \
         (f)->dp = 0; \
         (f)->proto = 0; \
-        SC_ATOMIC_RESET((f)->flow_state); \
-        SC_ATOMIC_RESET((f)->use_cnt); \
+        (f)->livedev = NULL; \
+        (f)->vlan_idx = 0; \
+        (f)->ffr = 0; \
+        (f)->next = NULL; \
+        (f)->timeout_at = 0; \
+        (f)->timeout_policy = 0; \
+        (f)->flow_state = 0; \
+        (f)->use_cnt = 0; \
         (f)->tenant_id = 0; \
         (f)->parent_id = 0; \
         (f)->probing_parser_toserver_alproto_masks = 0; \
@@ -104,18 +112,23 @@
         (f)->alproto_orig = 0; \
         (f)->alproto_expect = 0; \
         (f)->de_ctx_version = 0; \
-        (f)->thread_id = 0; \
+        (f)->thread_id[0] = 0; \
+        (f)->thread_id[1] = 0; \
         (f)->sgh_toserver = NULL; \
         (f)->sgh_toclient = NULL; \
         GenericVarFree((f)->flowvar); \
         (f)->flowvar = NULL; \
+        if (MacSetFlowStorageEnabled()) { \
+            MacSet *ms = FlowGetStorageById((f), MacSetGetFlowStorageID()); \
+            if (ms != NULL) { \
+                MacSetReset(ms); \
+            } \
+        } \
         RESET_COUNTERS((f)); \
     } while(0)
 
 #define FLOW_DESTROY(f) do { \
         FlowCleanupAppLayer((f)); \
-        SC_ATOMIC_DESTROY((f)->flow_state); \
-        SC_ATOMIC_DESTROY((f)->use_cnt); \
         \
         FLOWLOCK_DESTROY((f)); \
         GenericVarFree((f)->flowvar); \

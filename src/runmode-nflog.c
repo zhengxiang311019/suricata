@@ -21,7 +21,6 @@
  * \author Giuseppe Longo <giuseppelng@gmail.com>
  */
 #include "suricata-common.h"
-#include "config.h"
 #include "tm-threads.h"
 #include "conf.h"
 #include "runmodes.h"
@@ -34,16 +33,13 @@
 
 #include "source-nflog.h"
 
-static const char *default_mode = NULL;
-
 const char *RunModeIdsNflogGetDefaultMode(void)
 {
-    return default_mode;
+    return "autofp";
 }
 
 void RunModeIdsNflogRegister(void)
 {
-    default_mode = "autofp";
     RunModeRegisterNewRunMode(RUNMODE_NFLOG, "autofp",
                               "Multi threaded nflog mode",
                               RunModeIdsNflogAutoFp);
@@ -106,8 +102,7 @@ static void *ParseNflogConfig(const char *group)
     strlcpy(nflogconf->numgroup, group, sizeof(nflogconf->numgroup));
 
     if (ParseSizeStringU16(group, &nflogconf->group) < 0) {
-        SCLogError(SC_ERR_NFLOG_GROUP, "NFLOG's group number invalid.");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "NFLOG's group number invalid.");
     }
 
     boolval = ConfGetChildValueIntWithDefault(group_root, group_default,
@@ -188,8 +183,7 @@ int RunModeIdsNflogAutoFp(void)
                                       thread_name_autofp,
                                       live_dev);
     if (ret != 0) {
-        SCLogError(SC_ERR_RUNMODE, "Unable to start runmode");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Unable to start runmode");
     }
 
     SCLogInfo("RunModeIdsNflogAutoFp initialised");
@@ -216,8 +210,7 @@ int RunModeIdsNflogSingle(void)
                                       thread_name_single,
                                       live_dev);
     if (ret != 0) {
-        SCLogError(SC_ERR_RUNMODE, "Unable to start runmode");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Unable to start runmode");
     }
 
     SCLogInfo("RunModeIdsNflogSingle initialised");
@@ -244,8 +237,7 @@ int RunModeIdsNflogWorkers(void)
                                        thread_name_workers,
                                        live_dev);
     if (ret != 0) {
-        SCLogError(SC_ERR_RUNMODE, "Unable to start runmode");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Unable to start runmode");
     }
 
     SCLogInfo("RunModeIdsNflogWorkers initialised");

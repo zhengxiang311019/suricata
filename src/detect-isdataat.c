@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -44,20 +44,20 @@
 #include "util-debug.h"
 #include "util-byte.h"
 #include "detect-pcre.h"
-#include "detect-bytejump.h"
-#include "detect-byte-extract.h"
+#include "detect-byte.h"
 
 /**
  * \brief Regex for parsing our isdataat options
  */
 #define PARSE_REGEX  "^\\s*!?([^\\s,]+)\\s*(,\\s*relative)?\\s*(,\\s*rawbytes\\s*)?\\s*$"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
 int DetectIsdataatSetup (DetectEngineCtx *, Signature *, const char *);
-void DetectIsdataatRegisterTests(void);
-void DetectIsdataatFree(void *);
+#ifdef UNITTESTS
+static void DetectIsdataatRegisterTests(void);
+#endif
+void DetectIsdataatFree(DetectEngineCtx *, void *);
 
 static int DetectEndsWithSetup (DetectEngineCtx *de_ctx, Signature *s, const char *nullstr);
 
@@ -68,40 +68,41 @@ void DetectIsdataatRegister(void)
 {
     sigmatch_table[DETECT_ISDATAAT].name = "isdataat";
     sigmatch_table[DETECT_ISDATAAT].desc = "check if there is still data at a specific part of the payload";
-    sigmatch_table[DETECT_ISDATAAT].url = DOC_URL DOC_VERSION "/rules/payload-keywords.html#isadataat";
+    sigmatch_table[DETECT_ISDATAAT].url = "/rules/payload-keywords.html#isdataat";
     /* match is handled in DetectEngineContentInspection() */
     sigmatch_table[DETECT_ISDATAAT].Match = NULL;
     sigmatch_table[DETECT_ISDATAAT].Setup = DetectIsdataatSetup;
     sigmatch_table[DETECT_ISDATAAT].Free  = DetectIsdataatFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_ISDATAAT].RegisterTests = DetectIsdataatRegisterTests;
-
+#endif
     sigmatch_table[DETECT_ENDS_WITH].name = "endswith";
     sigmatch_table[DETECT_ENDS_WITH].desc = "make sure the previous content matches exactly at the end of the buffer";
-    sigmatch_table[DETECT_ENDS_WITH].url = DOC_URL DOC_VERSION "/rules/payload-keywords.html#endswith";
+    sigmatch_table[DETECT_ENDS_WITH].url = "/rules/payload-keywords.html#endswith";
     sigmatch_table[DETECT_ENDS_WITH].Setup = DetectEndsWithSetup;
     sigmatch_table[DETECT_ENDS_WITH].flags = SIGMATCH_NOOPT;
 
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 /**
  * \brief This function is used to parse isdataat options passed via isdataat: keyword
  *
+ * \param de_ctx Pointer to the detection engine context
  * \param isdataatstr Pointer to the user provided isdataat options
  *
  * \retval idad pointer to DetectIsdataatData on success
  * \retval NULL on failure
  */
-static DetectIsdataatData *DetectIsdataatParse (const char *isdataatstr, char **offset)
+static DetectIsdataatData *DetectIsdataatParse (DetectEngineCtx *de_ctx, const char *isdataatstr, char **offset)
 {
     DetectIsdataatData *idad = NULL;
     char *args[3] = {NULL,NULL,NULL};
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
     int i=0;
 
-    ret = pcre_exec(parse_regex, parse_regex_study, isdataatstr, strlen(isdataatstr), 0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, isdataatstr, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 1 || ret > 4) {
         SCLogError(SC_ERR_PCRE_MATCH, "pcre_exec parse error, ret %" PRId32 ", string %s", ret, isdataatstr);
         goto error;
@@ -152,7 +153,7 @@ static DetectIsdataatData *DetectIsdataatParse (const char *isdataatstr, char **
             if (*offset == NULL)
                 goto error;
         } else {
-            if (ByteExtractStringUint16(&idad->dataat, 10,
+            if (StringParseUint16(&idad->dataat, 10,
                                         strlen(args[0]), args[0]) < 0 ) {
                 SCLogError(SC_ERR_INVALID_VALUE, "isdataat out of range");
                 SCFree(idad);
@@ -188,7 +189,7 @@ error:
     }
 
     if (idad != NULL)
-        DetectIsdataatFree(idad);
+        DetectIsdataatFree(de_ctx, idad);
     return NULL;
 
 }
@@ -211,7 +212,7 @@ int DetectIsdataatSetup (DetectEngineCtx *de_ctx, Signature *s, const char *isda
     char *offset = NULL;
     int ret = -1;
 
-    idad = DetectIsdataatParse(isdataatstr, &offset);
+    idad = DetectIsdataatParse(de_ctx, isdataatstr, &offset);
     if (idad == NULL)
         return -1;
 
@@ -228,7 +229,7 @@ int DetectIsdataatSetup (DetectEngineCtx *de_ctx, Signature *s, const char *isda
         prev_pm = DetectGetLastSMFromLists(s,
             DETECT_CONTENT, DETECT_PCRE,
             DETECT_BYTETEST, DETECT_BYTEJUMP, DETECT_BYTE_EXTRACT,
-            DETECT_ISDATAAT, -1);
+            DETECT_ISDATAAT, DETECT_BYTEMATH, -1);
         if (prev_pm == NULL)
             sm_list = DETECT_SM_LIST_PMATCH;
         else {
@@ -241,14 +242,14 @@ int DetectIsdataatSetup (DetectEngineCtx *de_ctx, Signature *s, const char *isda
     }
 
     if (offset != NULL) {
-        SigMatch *bed_sm = DetectByteExtractRetrieveSMVar(offset, s);
-        if (bed_sm == NULL) {
+        DetectByteIndexType index;
+        if (!DetectByteRetrieveSMVar(offset, s, &index)) {
             SCLogError(SC_ERR_INVALID_SIGNATURE, "Unknown byte_extract var "
                        "seen in isdataat - %s\n", offset);
             goto end;
         }
-        idad->dataat = ((DetectByteExtractData *)bed_sm->ctx)->local_id;
-        idad->flags |= ISDATAAT_OFFSET_BE;
+        idad->dataat = index;
+        idad->flags |= ISDATAAT_OFFSET_VAR;
         SCLogDebug("isdataat uses byte_extract with local id %u", idad->dataat);
         SCFree(offset);
         offset = NULL;
@@ -259,7 +260,7 @@ int DetectIsdataatSetup (DetectEngineCtx *de_ctx, Signature *s, const char *isda
         idad->dataat == 1 &&
         (idad->flags & (ISDATAAT_RELATIVE|ISDATAAT_NEGATED)) == (ISDATAAT_RELATIVE|ISDATAAT_NEGATED))
     {
-        DetectIsdataatFree(idad);
+        DetectIsdataatFree(de_ctx, idad);
         DetectContentData *cd = (DetectContentData *)prev_pm->ctx;
         cd->flags |= DETECT_CONTENT_ENDS_WITH;
         ret = 0;
@@ -297,7 +298,7 @@ end:
     if (offset)
         SCFree(offset);
     if (ret != 0)
-        DetectIsdataatFree(idad);
+        DetectIsdataatFree(de_ctx, idad);
     return ret;
 }
 
@@ -306,7 +307,7 @@ end:
  *
  * \param idad pointer to DetectIsdataatData
  */
-void DetectIsdataatFree(void *ptr)
+void DetectIsdataatFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectIsdataatData *idad = (DetectIsdataatData *)ptr;
     SCFree(idad);
@@ -346,9 +347,9 @@ static int DetectIsdataatTestParse01 (void)
 {
     int result = 0;
     DetectIsdataatData *idad = NULL;
-    idad = DetectIsdataatParse("30 ", NULL);
+    idad = DetectIsdataatParse(NULL, "30 ", NULL);
     if (idad != NULL) {
-        DetectIsdataatFree(idad);
+        DetectIsdataatFree(NULL, idad);
         result = 1;
     }
 
@@ -363,9 +364,9 @@ static int DetectIsdataatTestParse02 (void)
 {
     int result = 0;
     DetectIsdataatData *idad = NULL;
-    idad = DetectIsdataatParse("30 , relative", NULL);
+    idad = DetectIsdataatParse(NULL, "30 , relative", NULL);
     if (idad != NULL && idad->flags & ISDATAAT_RELATIVE && !(idad->flags & ISDATAAT_RAWBYTES)) {
-        DetectIsdataatFree(idad);
+        DetectIsdataatFree(NULL, idad);
         result = 1;
     }
 
@@ -380,9 +381,9 @@ static int DetectIsdataatTestParse03 (void)
 {
     int result = 0;
     DetectIsdataatData *idad = NULL;
-    idad = DetectIsdataatParse("30,relative, rawbytes ", NULL);
+    idad = DetectIsdataatParse(NULL, "30,relative, rawbytes ", NULL);
     if (idad != NULL && idad->flags & ISDATAAT_RELATIVE && idad->flags & ISDATAAT_RAWBYTES) {
-        DetectIsdataatFree(idad);
+        DetectIsdataatFree(NULL, idad);
         result = 1;
     }
 
@@ -397,19 +398,25 @@ static int DetectIsdataatTestParse04(void)
     Signature *s = SigAlloc();
     int result = 1;
 
-    s->alproto = ALPROTO_DCERPC;
+    if (DetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0) {
+        SigFree(NULL, s);
+        return 0;
+    }
 
     result &= (DetectIsdataatSetup(NULL, s, "30") == 0);
     result &= (s->sm_lists[g_dce_stub_data_buffer_id] == NULL && s->sm_lists[DETECT_SM_LIST_PMATCH] != NULL);
-    SigFree(s);
+    SigFree(NULL, s);
 
     s = SigAlloc();
-    s->alproto = ALPROTO_DCERPC;
+    if (DetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0) {
+        SigFree(NULL, s);
+        return 0;
+    }
     /* failure since we have no preceding content/pcre/bytejump */
     result &= (DetectIsdataatSetup(NULL, s, "30,relative") == 0);
     result &= (s->sm_lists[g_dce_stub_data_buffer_id] == NULL && s->sm_lists[DETECT_SM_LIST_PMATCH] != NULL);
 
-    SigFree(s);
+    SigFree(NULL, s);
 
     return result;
 }
@@ -663,14 +670,12 @@ static int DetectIsdataatTestPacket03 (void)
 end:
     return result;
 }
-#endif
 
 /**
  * \brief this function registers unit tests for DetectIsdataat
  */
 void DetectIsdataatRegisterTests(void)
 {
-#ifdef UNITTESTS
     g_dce_stub_data_buffer_id = DetectBufferTypeGetByName("dce_stub_data");
 
     UtRegisterTest("DetectIsdataatTestParse01", DetectIsdataatTestParse01);
@@ -683,5 +688,5 @@ void DetectIsdataatRegisterTests(void)
     UtRegisterTest("DetectIsdataatTestPacket01", DetectIsdataatTestPacket01);
     UtRegisterTest("DetectIsdataatTestPacket02", DetectIsdataatTestPacket02);
     UtRegisterTest("DetectIsdataatTestPacket03", DetectIsdataatTestPacket03);
-#endif
 }
+#endif

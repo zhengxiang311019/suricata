@@ -241,7 +241,7 @@ void PacketAlertFinalize(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx
     int i = 0;
 
     while (i < p->alerts.cnt) {
-        SCLogDebug("Sig->num: %"PRIu16, p->alerts.alerts[i].num);
+        SCLogDebug("Sig->num: %"PRIu32, p->alerts.alerts[i].num);
         const Signature *s = de_ctx->sig_array[p->alerts.alerts[i].num];
 
         int res = PacketAlertHandle(de_ctx, det_ctx, s, p, &p->alerts.alerts[i]);
@@ -254,7 +254,7 @@ void PacketAlertFinalize(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx
                 while (1) {
                     /* tags are set only for alerts */
                     KEYWORD_PROFILING_START;
-                    sigmatch_table[smd->type].Match(NULL, det_ctx, p, (Signature *)s, smd->ctx);
+                    sigmatch_table[smd->type].Match(det_ctx, p, (Signature *)s, smd->ctx);
                     KEYWORD_PROFILING_END(det_ctx, smd->type, 1);
                     if (smd->is_last)
                         break;

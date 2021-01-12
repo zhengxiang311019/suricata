@@ -30,6 +30,7 @@
 #include "util-runmodes.h"
 #include "util-device.h"
 #include "util-ioctl.h"
+#include "util-byte.h"
 
 #ifdef HAVE_PFRING
 #include <pfring.h>
@@ -70,7 +71,7 @@ void RunModeIdsPfringRegister(void)
 static void PfringDerefConfig(void *conf)
 {
     PfringIfaceConfig *pfp = (PfringIfaceConfig *)conf;
-    if (SC_ATOMIC_SUB(pfp->ref, 1) == 0) {
+    if (SC_ATOMIC_SUB(pfp->ref, 1) == 1) {
         if (pfp->bpf_filter) {
             SCFree(pfp->bpf_filter);
         }
@@ -123,7 +124,11 @@ static void *OldParsePfringConfig(const char *iface)
         pfconf->threads = 1;
     } else {
         if (threadsstr != NULL) {
-            pfconf->threads = atoi(threadsstr);
+            if (StringParseInt32(&pfconf->threads, 10, 0, threadsstr) < 0) {
+                SCLogWarning(SC_ERR_INVALID_VALUE, "Invalid value for "
+                             "pfring.threads: '%s'. Resetting to 1.", threadsstr);
+                pfconf->threads = 1;
+            }
         }
     }
     if (pfconf->threads == 0) {
@@ -141,7 +146,11 @@ static void *OldParsePfringConfig(const char *iface)
     } else if (ConfGet("pfring.cluster-id", &tmpclusterid) != 1) {
         SCLogError(SC_ERR_INVALID_ARGUMENT,"Could not get cluster-id from config");
     } else {
-        pfconf->cluster_id = (uint16_t)atoi(tmpclusterid);
+        if (StringParseInt32(&pfconf->cluster_id, 10, 0, (const char *)tmpclusterid) < 0) {
+            SCLogWarning(SC_ERR_INVALID_VALUE, "Invalid value for "
+                         "pfring.cluster_id: '%s'. Resetting to 1.", tmpclusterid);
+            pfconf->cluster_id = 1;
+        }
         pfconf->flags |= PFRING_CONF_FLAGS_CLUSTER;
         SCLogDebug("Going to use cluster-id %" PRId32, pfconf->cluster_id);
     }
@@ -255,7 +264,14 @@ static void *ParsePfringConfig(const char *iface)
                 }
             }
         } else {
-            pfconf->threads = atoi(threadsstr);
+            uint16_t threads = 0;
+            if (StringParseUint16(&threads, 10, 0, (const char *)threadsstr) < 0) {
+                SCLogWarning(SC_ERR_INVALID_VALUE, "Invalid value for "
+                             "pfring.threads: '%s'. Resetting to 1.", threadsstr);
+                pfconf->threads = 1;
+            } else {
+                pfconf->threads = threads;
+            }
         }
     }
     if (pfconf->threads <= 0) {
@@ -267,7 +283,11 @@ static void *ParsePfringConfig(const char *iface)
 
     /* command line value has precedence */
     if (ConfGet("pfring.cluster-id", &tmpclusterid) == 1) {
-        pfconf->cluster_id = (uint16_t)atoi(tmpclusterid);
+        if (StringParseInt32(&pfconf->cluster_id, 10, 0, (const char *)tmpclusterid) < 0) {
+            SCLogWarning(SC_ERR_INVALID_VALUE, "Invalid value for "
+                         "pfring.cluster-id: '%s'. Resetting to 1.", tmpclusterid);
+            pfconf->cluster_id = 1;
+        }
         pfconf->flags |= PFRING_CONF_FLAGS_CLUSTER;
         SCLogDebug("Going to use command-line provided cluster-id %" PRId32,
                    pfconf->cluster_id);
@@ -283,7 +303,11 @@ static void *ParsePfringConfig(const char *iface)
             SCLogError(SC_ERR_INVALID_ARGUMENT,
                        "Could not get cluster-id from config");
         } else {
-            pfconf->cluster_id = (uint16_t)atoi(tmpclusterid);
+            if (StringParseInt32(&pfconf->cluster_id, 10, 0, (const char *)tmpclusterid) < 0) {
+                SCLogWarning(SC_ERR_INVALID_VALUE, "Invalid value for "
+                             "pfring.cluster-id: '%s'. Resetting to 1.", tmpclusterid);
+                pfconf->cluster_id = 1;
+            }
             pfconf->flags |= PFRING_CONF_FLAGS_CLUSTER;
             SCLogDebug("Going to use cluster-id %" PRId32, pfconf->cluster_id);
         }
@@ -449,9 +473,8 @@ int RunModeIdsPfringAutoFp(void)
 
     ret = GetDevAndParser(&live_dev, &tparser);
     if (ret != 0) {
-        SCLogError(SC_ERR_MISSING_CONFIG_PARAM,
-                "Unable to get parser and interface params");
-        exit(EXIT_FAILURE);
+                FatalError(SC_ERR_FATAL,
+                           "Unable to get parser and interface params");
     }
 
     ret = RunModeSetLiveCaptureAutoFp(tparser,
@@ -460,8 +483,7 @@ int RunModeIdsPfringAutoFp(void)
                               "DecodePfring", thread_name_autofp,
                               live_dev);
     if (ret != 0) {
-        SCLogError(SC_ERR_RUNMODE, "Runmode start failed");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Runmode start failed");
     }
 
     SCLogInfo("RunModeIdsPfringAutoFp initialised");
@@ -486,9 +508,8 @@ int RunModeIdsPfringSingle(void)
 
     ret = GetDevAndParser(&live_dev, &tparser);
     if (ret != 0) {
-        SCLogError(SC_ERR_MISSING_CONFIG_PARAM,
-                "Unable to get parser and interface params");
-        exit(EXIT_FAILURE);
+                FatalError(SC_ERR_FATAL,
+                           "Unable to get parser and interface params");
     }
 
     ret = RunModeSetLiveCaptureSingle(tparser,
@@ -497,8 +518,7 @@ int RunModeIdsPfringSingle(void)
                               "DecodePfring", thread_name_single,
                               live_dev);
     if (ret != 0) {
-        SCLogError(SC_ERR_RUNMODE, "Runmode start failed");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Runmode start failed");
     }
 
     SCLogInfo("RunModeIdsPfringSingle initialised");
@@ -523,9 +543,8 @@ int RunModeIdsPfringWorkers(void)
 
     ret = GetDevAndParser(&live_dev, &tparser);
     if (ret != 0) {
-        SCLogError(SC_ERR_MISSING_CONFIG_PARAM,
-                "Unable to get parser and interface params");
-        exit(EXIT_FAILURE);
+                FatalError(SC_ERR_FATAL,
+                           "Unable to get parser and interface params");
     }
 
     ret = RunModeSetLiveCaptureWorkers(tparser,
@@ -534,8 +553,7 @@ int RunModeIdsPfringWorkers(void)
                               "DecodePfring", thread_name_workers,
                               live_dev);
     if (ret != 0) {
-        SCLogError(SC_ERR_RUNMODE, "Runmode start failed");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Runmode start failed");
     }
 
     SCLogInfo("RunModeIdsPfringWorkers initialised");

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -44,17 +44,17 @@
 
 #define PARSE_REGEX "\\S[0-9A-z_]+[.][A-z0-9_+.]+$"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
-static int DetectEngineEventMatch (ThreadVars *, DetectEngineThreadCtx *,
+static int DetectEngineEventMatch (DetectEngineThreadCtx *,
         Packet *, const Signature *, const SigMatchCtx *);
 static int DetectEngineEventSetup (DetectEngineCtx *, Signature *, const char *);
 static int DetectDecodeEventSetup (DetectEngineCtx *, Signature *, const char *);
 static int DetectStreamEventSetup (DetectEngineCtx *, Signature *, const char *);
-static void DetectEngineEventFree (void *);
+static void DetectEngineEventFree (DetectEngineCtx *, void *);
+#ifdef UNITTESTS
 void EngineEventRegisterTests(void);
-
+#endif
 
 /**
  * \brief Registration function for decode-event: keyword
@@ -65,7 +65,9 @@ void DetectEngineEventRegister (void)
     sigmatch_table[DETECT_ENGINE_EVENT].Match = DetectEngineEventMatch;
     sigmatch_table[DETECT_ENGINE_EVENT].Setup = DetectEngineEventSetup;
     sigmatch_table[DETECT_ENGINE_EVENT].Free  = DetectEngineEventFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_ENGINE_EVENT].RegisterTests = EngineEventRegisterTests;
+#endif
 
     sigmatch_table[DETECT_DECODE_EVENT].name = "decode-event";
     sigmatch_table[DETECT_DECODE_EVENT].Match = DetectEngineEventMatch;
@@ -78,7 +80,7 @@ void DetectEngineEventRegister (void)
     sigmatch_table[DETECT_STREAM_EVENT].Setup = DetectStreamEventSetup;
     sigmatch_table[DETECT_STREAM_EVENT].Free  = DetectEngineEventFree;
 
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 /**
@@ -93,7 +95,7 @@ void DetectEngineEventRegister (void)
  * \retval 0 no match
  * \retval 1 match
  */
-static int DetectEngineEventMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectEngineEventMatch (DetectEngineThreadCtx *det_ctx,
         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     SCEnter();
@@ -120,11 +122,10 @@ static DetectEngineEventData *DetectEngineEventParse (const char *rawstr)
 {
     int i;
     DetectEngineEventData *de = NULL;
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0, found = 0;
     int ov[MAX_SUBSTRINGS];
 
-    ret = pcre_exec(parse_regex, parse_regex_study, rawstr, strlen(rawstr), 0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, rawstr, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 1) {
         SCLogError(SC_ERR_PCRE_MATCH, "pcre_exec parse error, ret %" PRId32
                 ", string %s", ret, rawstr);
@@ -213,7 +214,7 @@ static int DetectEngineEventSetup (DetectEngineCtx *de_ctx, Signature *s, const 
  *
  * \param de pointer to DetectEngineEventData
  */
-static void DetectEngineEventFree(void *ptr)
+static void DetectEngineEventFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectEngineEventData *de = (DetectEngineEventData *)ptr;
     if (de)
@@ -267,7 +268,7 @@ static int EngineEventTestParse01 (void)
     DetectEngineEventData *de = NULL;
     de = DetectEngineEventParse("decoder.ipv4.pkt_too_small");
     if (de) {
-        DetectEngineEventFree(de);
+        DetectEngineEventFree(NULL, de);
         return 1;
     }
 
@@ -283,7 +284,7 @@ static int EngineEventTestParse02 (void)
     DetectEngineEventData *de = NULL;
     de = DetectEngineEventParse("decoder.PPP.pkt_too_small");
     if (de) {
-        DetectEngineEventFree(de);
+        DetectEngineEventFree(NULL, de);
         return 1;
     }
 
@@ -298,7 +299,7 @@ static int EngineEventTestParse03 (void)
     DetectEngineEventData *de = NULL;
     de = DetectEngineEventParse("decoder.IPV6.PKT_TOO_SMALL");
     if (de) {
-        DetectEngineEventFree(de);
+        DetectEngineEventFree(NULL, de);
         return 1;
     }
 
@@ -313,7 +314,7 @@ static int EngineEventTestParse04 (void)
     DetectEngineEventData *de = NULL;
     de = DetectEngineEventParse("decoder.IPV6.INVALID_EVENT");
     if (de) {
-        DetectEngineEventFree(de);
+        DetectEngineEventFree(NULL, de);
         return 0;
     }
 
@@ -328,7 +329,7 @@ static int EngineEventTestParse05 (void)
     DetectEngineEventData *de = NULL;
     de = DetectEngineEventParse("decoder.IPV-6,INVALID_CHAR");
     if (de) {
-        DetectEngineEventFree(de);
+        DetectEngineEventFree(NULL, de);
         return 0;
     }
 
@@ -367,7 +368,7 @@ static int EngineEventTestParse06 (void)
     sm->type = DETECT_DECODE_EVENT;
     sm->ctx = (SigMatchCtx *)de;
 
-    ret = DetectEngineEventMatch(&tv,NULL,p,NULL,sm->ctx);
+    ret = DetectEngineEventMatch(NULL,p,NULL,sm->ctx);
 
     if(ret) {
         SCFree(p);
@@ -380,19 +381,17 @@ error:
     SCFree(p);
     return 0;
 }
-#endif /* UNITTESTS */
 
 /**
  * \brief this function registers unit tests for EngineEvent
  */
 void EngineEventRegisterTests(void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("EngineEventTestParse01", EngineEventTestParse01);
     UtRegisterTest("EngineEventTestParse02", EngineEventTestParse02);
     UtRegisterTest("EngineEventTestParse03", EngineEventTestParse03);
     UtRegisterTest("EngineEventTestParse04", EngineEventTestParse04);
     UtRegisterTest("EngineEventTestParse05", EngineEventTestParse05);
     UtRegisterTest("EngineEventTestParse06", EngineEventTestParse06);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

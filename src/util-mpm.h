@@ -34,7 +34,7 @@ enum {
     /* aho-corasick */
     MPM_AC,
     MPM_AC_BS,
-    MPM_AC_TILE,
+    MPM_AC_KS,
     MPM_HS,
     /* table size */
     MPM_TABLE_SIZE,
@@ -79,15 +79,19 @@ typedef struct MpmPattern_ {
     struct MpmPattern_ *next;
 } MpmPattern;
 
+/* Indicates if this a global mpm_ctx.  Global mpm_ctx is the one that
+ * is instantiated when we use "single".  Non-global is "full", i.e.
+ * one per sgh. */
+#define MPMCTX_FLAGS_GLOBAL     BIT_U8(0)
+#define MPMCTX_FLAGS_NODEPTH    BIT_U8(1)
+
 typedef struct MpmCtx_ {
     void *ctx;
-    uint16_t mpm_type;
+    uint8_t mpm_type;
 
-    /* Indicates if this a global mpm_ctx.  Global mpm_ctx is the one that
-     * is instantiated when we use "single".  Non-global is "full", i.e.
-     * one per sgh.  We are using a uint16_t here to avoiding using a pad.
-     * You can use a uint8_t here as well. */
-    uint16_t global;
+    uint8_t flags;
+
+    uint16_t maxdepth;
 
     /* unique patterns */
     uint32_t pattern_cnt;
@@ -113,11 +117,13 @@ typedef struct MpmCtxFactoryItem_ {
     MpmCtx *mpm_ctx_ts;
     MpmCtx *mpm_ctx_tc;
     int32_t id;
+    int32_t sm_list;
 } MpmCtxFactoryItem;
 
 typedef struct MpmCtxFactoryContainer_ {
     MpmCtxFactoryItem *items;
     int32_t no_of_items;
+    int32_t max_id;
 } MpmCtxFactoryContainer;
 
 /** pattern is case insensitive */
@@ -162,12 +168,12 @@ typedef struct MpmTableElmt_ {
     uint8_t flags;
 } MpmTableElmt;
 
-MpmTableElmt mpm_table[MPM_TABLE_SIZE];
-int mpm_default_matcher;
+extern MpmTableElmt mpm_table[MPM_TABLE_SIZE];
+extern int mpm_default_matcher;
 
 struct DetectEngineCtx_;
 
-int32_t MpmFactoryRegisterMpmCtxProfile(struct DetectEngineCtx_ *, const char *);
+int32_t MpmFactoryRegisterMpmCtxProfile(struct DetectEngineCtx_ *, const char *, const int);
 void MpmFactoryReClaimMpmCtx(const struct DetectEngineCtx_ *, MpmCtx *);
 MpmCtx *MpmFactoryGetMpmCtxForProfile(const struct DetectEngineCtx_ *, int32_t, int);
 void MpmFactoryDeRegisterAllMpmCtxProfiles(struct DetectEngineCtx_ *);

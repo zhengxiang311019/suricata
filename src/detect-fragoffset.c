@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -41,17 +41,18 @@
 
 #define PARSE_REGEX "^\\s*(?:(<|>))?\\s*([0-9]+)"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
-static int DetectFragOffsetMatch(ThreadVars *, DetectEngineThreadCtx *,
+static int DetectFragOffsetMatch(DetectEngineThreadCtx *,
         Packet *, const Signature *, const SigMatchCtx *);
 static int DetectFragOffsetSetup(DetectEngineCtx *, Signature *, const char *);
+#ifdef UNITTESTS
 void DetectFragOffsetRegisterTests(void);
-void DetectFragOffsetFree(void *);
+#endif
+void DetectFragOffsetFree(DetectEngineCtx *, void *);
 
 static int PrefilterSetupFragOffset(DetectEngineCtx *de_ctx, SigGroupHead *sgh);
-static _Bool PrefilterFragOffsetIsPrefilterable(const Signature *s);
+static bool PrefilterFragOffsetIsPrefilterable(const Signature *s);
 
 /**
  * \brief Registration function for fragoffset
@@ -60,16 +61,17 @@ void DetectFragOffsetRegister (void)
 {
     sigmatch_table[DETECT_FRAGOFFSET].name = "fragoffset";
     sigmatch_table[DETECT_FRAGOFFSET].desc = "match on specific decimal values of the IP fragment offset field";
-    sigmatch_table[DETECT_FRAGOFFSET].url = DOC_URL DOC_VERSION "/rules/header-keywords.html#fragoffset";
+    sigmatch_table[DETECT_FRAGOFFSET].url = "/rules/header-keywords.html#fragoffset";
     sigmatch_table[DETECT_FRAGOFFSET].Match = DetectFragOffsetMatch;
     sigmatch_table[DETECT_FRAGOFFSET].Setup = DetectFragOffsetSetup;
     sigmatch_table[DETECT_FRAGOFFSET].Free = DetectFragOffsetFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_FRAGOFFSET].RegisterTests = DetectFragOffsetRegisterTests;
-
+#endif
     sigmatch_table[DETECT_FRAGOFFSET].SupportsPrefilter = PrefilterFragOffsetIsPrefilterable;
     sigmatch_table[DETECT_FRAGOFFSET].SetupPrefilter = PrefilterSetupFragOffset;
 
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 static inline int FragOffsetMatch(const uint16_t poffset, const uint8_t mode,
@@ -103,7 +105,7 @@ static inline int FragOffsetMatch(const uint16_t poffset, const uint8_t mode,
  * \retval 1 match
  *
  */
-static int DetectFragOffsetMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectFragOffsetMatch (DetectEngineThreadCtx *det_ctx,
         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     uint16_t frag = 0;
@@ -131,23 +133,23 @@ static int DetectFragOffsetMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx,
 /**
  * \brief This function is used to parse fragoffset option passed via fragoffset: keyword
  *
+ * \param de_ctx Pointer to the detection engine context
  * \param fragoffsetstr Pointer to the user provided fragoffset options
  *
  * \retval fragoff pointer to DetectFragOffsetData on success
  * \retval NULL on failure
  */
-static DetectFragOffsetData *DetectFragOffsetParse (const char *fragoffsetstr)
+static DetectFragOffsetData *DetectFragOffsetParse (DetectEngineCtx *de_ctx, const char *fragoffsetstr)
 {
     DetectFragOffsetData *fragoff = NULL;
     char *substr[3] = {NULL, NULL, NULL};
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
     int i;
     const char *str_ptr;
     char *mode = NULL;
 
-    ret = pcre_exec(parse_regex, parse_regex_study, fragoffsetstr, strlen(fragoffsetstr), 0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, fragoffsetstr, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 1 || ret > 4) {
         SCLogError(SC_ERR_PCRE_MATCH,"Parse error %s", fragoffsetstr);
         goto error;
@@ -186,7 +188,7 @@ static DetectFragOffsetData *DetectFragOffsetParse (const char *fragoffsetstr)
         }
     }
 
-    if (ByteExtractStringUint16(&fragoff->frag_off, 10, 0, substr[1]) < 0) {
+    if (StringParseUint16(&fragoff->frag_off, 10, 0, substr[1]) < 0) {
         SCLogError(SC_ERR_INVALID_ARGUMENT, "specified frag offset %s is not "
                                         "valid", substr[1]);
         goto error;
@@ -202,7 +204,7 @@ error:
     for (i = 0; i < 3; i++) {
         if (substr[i] != NULL) SCFree(substr[i]);
     }
-    if (fragoff != NULL) DetectFragOffsetFree(fragoff);
+    if (fragoff != NULL) DetectFragOffsetFree(de_ctx, fragoff);
     return NULL;
 
 }
@@ -222,7 +224,7 @@ static int DetectFragOffsetSetup (DetectEngineCtx *de_ctx, Signature *s, const c
     DetectFragOffsetData *fragoff = NULL;
     SigMatch *sm = NULL;
 
-    fragoff = DetectFragOffsetParse(fragoffsetstr);
+    fragoff = DetectFragOffsetParse(de_ctx, fragoffsetstr);
     if (fragoff == NULL) goto error;
 
     sm = SigMatchAlloc();
@@ -237,7 +239,7 @@ static int DetectFragOffsetSetup (DetectEngineCtx *de_ctx, Signature *s, const c
     return 0;
 
 error:
-    if (fragoff != NULL) DetectFragOffsetFree(fragoff);
+    if (fragoff != NULL) DetectFragOffsetFree(de_ctx, fragoff);
     if (sm != NULL) SCFree(sm);
     return -1;
 
@@ -248,7 +250,7 @@ error:
  *
  * \param ptr pointer to DetectFragOffsetData
  */
-void DetectFragOffsetFree (void *ptr)
+void DetectFragOffsetFree (DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectFragOffsetData *fragoff = (DetectFragOffsetData *)ptr;
     SCFree(fragoff);
@@ -290,7 +292,7 @@ PrefilterPacketFragOffsetSet(PrefilterPacketHeaderValue *v, void *smctx)
     v->u16[1] = fb->frag_off;
 }
 
-static _Bool
+static bool
 PrefilterPacketFragOffsetCompare(PrefilterPacketHeaderValue v, void *smctx)
 {
     const DetectFragOffsetData *fb = smctx;
@@ -310,7 +312,7 @@ static int PrefilterSetupFragOffset(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
         PrefilterPacketFragOffsetMatch);
 }
 
-static _Bool PrefilterFragOffsetIsPrefilterable(const Signature *s)
+static bool PrefilterFragOffsetIsPrefilterable(const Signature *s)
 {
     const SigMatch *sm;
     for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
@@ -332,9 +334,9 @@ static _Bool PrefilterFragOffsetIsPrefilterable(const Signature *s)
 static int DetectFragOffsetParseTest01 (void)
 {
     DetectFragOffsetData *fragoff = NULL;
-    fragoff = DetectFragOffsetParse("300");
+    fragoff = DetectFragOffsetParse(NULL, "300");
     if (fragoff != NULL && fragoff->frag_off == 300) {
-        DetectFragOffsetFree(fragoff);
+        DetectFragOffsetFree(NULL, fragoff);
         return 1;
     }
     return 0;
@@ -347,9 +349,9 @@ static int DetectFragOffsetParseTest01 (void)
 static int DetectFragOffsetParseTest02 (void)
 {
     DetectFragOffsetData *fragoff = NULL;
-    fragoff = DetectFragOffsetParse(">300");
+    fragoff = DetectFragOffsetParse(NULL, ">300");
     if (fragoff != NULL && fragoff->frag_off == 300 && fragoff->mode == FRAG_MORE) {
-        DetectFragOffsetFree(fragoff);
+        DetectFragOffsetFree(NULL, fragoff);
         return 1;
     }
     return 0;
@@ -361,9 +363,9 @@ static int DetectFragOffsetParseTest02 (void)
 static int DetectFragOffsetParseTest03 (void)
 {
     DetectFragOffsetData *fragoff = NULL;
-    fragoff = DetectFragOffsetParse("badc");
+    fragoff = DetectFragOffsetParse(NULL, "badc");
     if (fragoff != NULL) {
-        DetectFragOffsetFree(fragoff);
+        DetectFragOffsetFree(NULL, fragoff);
         return 0;
     }
     return 1;
@@ -447,15 +449,12 @@ end:
     return result;
 
 }
-#endif /* UNITTESTS */
 
 void DetectFragOffsetRegisterTests (void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("DetectFragOffsetParseTest01", DetectFragOffsetParseTest01);
     UtRegisterTest("DetectFragOffsetParseTest02", DetectFragOffsetParseTest02);
     UtRegisterTest("DetectFragOffsetParseTest03", DetectFragOffsetParseTest03);
     UtRegisterTest("DetectFragOffsetMatchTest01", DetectFragOffsetMatchTest01);
-#endif /* UNITTESTS */
 }
-
+#endif /* UNITTESTS */

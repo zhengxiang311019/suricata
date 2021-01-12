@@ -40,7 +40,7 @@
 
 #include "detect-content.h"
 #include "detect-uricontent.h"
-#include "detect-flags.h"
+#include "detect-tcp-flags.h"
 
 #include "util-hash.h"
 #include "util-hashlist.h"
@@ -63,6 +63,9 @@ void SigGroupHeadInitDataFree(SigGroupHeadInitData *sghid)
     }
     if (sghid->app_mpms != NULL) {
         SCFree(sghid->app_mpms);
+    }
+    if (sghid->pkt_mpms != NULL) {
+        SCFree(sghid->pkt_mpms);
     }
 
     PrefilterFreeEnginesList(sghid->tx_engines);

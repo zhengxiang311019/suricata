@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2019 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -32,6 +32,7 @@
 #include "detect-parse.h"
 #include "detect-content.h"
 #include "detect-uricontent.h"
+#include "detect-byte.h"
 #include "detect-byte-extract.h"
 #include "detect-depth.h"
 
@@ -48,15 +49,14 @@ void DetectDepthRegister (void)
 {
     sigmatch_table[DETECT_DEPTH].name = "depth";
     sigmatch_table[DETECT_DEPTH].desc = "designate how many bytes from the beginning of the payload will be checked";
-    sigmatch_table[DETECT_DEPTH].url = DOC_URL DOC_VERSION "/rules/payload-keywords.html#depth";
+    sigmatch_table[DETECT_DEPTH].url = "/rules/payload-keywords.html#depth";
     sigmatch_table[DETECT_DEPTH].Match = NULL;
     sigmatch_table[DETECT_DEPTH].Setup = DetectDepthSetup;
     sigmatch_table[DETECT_DEPTH].Free  = NULL;
-    sigmatch_table[DETECT_DEPTH].RegisterTests = NULL;
 
     sigmatch_table[DETECT_STARTS_WITH].name = "startswith";
-    sigmatch_table[DETECT_STARTS_WITH].desc = "pattern must be at the start of a buffer (same as 'depth:<pattern len>';)";
-    sigmatch_table[DETECT_STARTS_WITH].url = DOC_URL DOC_VERSION "/rules/payload-keywords.html#startswith";
+    sigmatch_table[DETECT_STARTS_WITH].desc = "pattern must be at the start of a buffer (same as 'depth:<pattern len>')";
+    sigmatch_table[DETECT_STARTS_WITH].url = "/rules/payload-keywords.html#startswith";
     sigmatch_table[DETECT_STARTS_WITH].Setup = DetectStartsWithSetup;
     sigmatch_table[DETECT_STARTS_WITH].flags |= SIGMATCH_NOOPT;
 }
@@ -76,7 +76,7 @@ static int DetectDepthSetup (DetectEngineCtx *de_ctx, Signature *s, const char *
                    "http_method option, http_cookie, http_raw_uri, "
                    "http_stat_msg, http_stat_code, http_user_agent, "
                    "http_host, http_raw_host or "
-                   "file_data/dce_stub_data sticky buffer options");
+                   "file_data/dce_stub_data sticky buffer options.");
         goto end;
     }
 
@@ -96,34 +96,34 @@ static int DetectDepthSetup (DetectEngineCtx *de_ctx, Signature *s, const char *
     }
     if (cd->flags & DETECT_CONTENT_NEGATED && cd->flags & DETECT_CONTENT_FAST_PATTERN) {
         SCLogError(SC_ERR_INVALID_SIGNATURE, "can't have a relative "
-                   "negated keyword set along with a fast_pattern");
+                   "negated keyword set along with 'fast_pattern'.");
         goto end;
     }
     if (cd->flags & DETECT_CONTENT_FAST_PATTERN_ONLY) {
         SCLogError(SC_ERR_INVALID_SIGNATURE, "can't have a relative "
-                   "keyword set along with a fast_pattern:only;");
+                   "keyword set along with 'fast_pattern:only;'.");
         goto end;
     }
     if (str[0] != '-' && isalpha((unsigned char)str[0])) {
-        SigMatch *bed_sm = DetectByteExtractRetrieveSMVar(str, s);
-        if (bed_sm == NULL) {
-            SCLogError(SC_ERR_INVALID_SIGNATURE, "unknown byte_extract var "
-                       "seen in depth - %s\n", str);
+        DetectByteIndexType index;
+        if (!DetectByteRetrieveSMVar(str, s, &index)) {
+            SCLogError(SC_ERR_INVALID_SIGNATURE, "unknown byte_ keyword var "
+                       "seen in depth - %s.", str);
             goto end;
         }
-        cd->depth = ((DetectByteExtractData *)bed_sm->ctx)->local_id;
-        cd->flags |= DETECT_CONTENT_DEPTH_BE;
+        cd->depth = index;
+        cd->flags |= DETECT_CONTENT_DEPTH_VAR;
     } else {
-        if (ByteExtractStringUint16(&cd->depth, 0, 0, str) != (int)strlen(str))
+        if (StringParseUint16(&cd->depth, 0, 0, str) < 0)
         {
             SCLogError(SC_ERR_INVALID_SIGNATURE,
-                      "invalid value for depth: %s", str);
+                      "invalid value for depth: %s.", str);
             goto end;
         }
 
         if (cd->depth < cd->content_len) {
             SCLogError(SC_ERR_INVALID_SIGNATURE, "depth:%u smaller than "
-                   "content of len %u", cd->depth, cd->content_len);
+                   "content of len %u.", cd->depth, cd->content_len);
             return -1;
         }
         /* Now update the real limit, as depth is relative to the offset */
@@ -145,7 +145,7 @@ static int DetectStartsWithSetup (DetectEngineCtx *de_ctx, Signature *s, const c
     pm = DetectGetLastSMFromLists(s, DETECT_CONTENT, -1);
     if (pm == NULL) {
         SCLogError(SC_ERR_DEPTH_MISSING_CONTENT, "startswith needs a "
-                   "preceding content option");
+                   "preceding content option.");
         goto end;
     }
 
@@ -154,7 +154,7 @@ static int DetectStartsWithSetup (DetectEngineCtx *de_ctx, Signature *s, const c
 
     if (cd->flags & DETECT_CONTENT_DEPTH) {
         SCLogError(SC_ERR_INVALID_SIGNATURE, "can't use multiple "
-                "depth/startswith settings for the same content");
+                "depth/startswith settings for the same content.");
         goto end;
     }
     if ((cd->flags & DETECT_CONTENT_WITHIN) || (cd->flags & DETECT_CONTENT_DISTANCE)) {
@@ -166,17 +166,17 @@ static int DetectStartsWithSetup (DetectEngineCtx *de_ctx, Signature *s, const c
     }
     if (cd->flags & DETECT_CONTENT_NEGATED && cd->flags & DETECT_CONTENT_FAST_PATTERN) {
         SCLogError(SC_ERR_INVALID_SIGNATURE, "can't have a relative "
-                   "negated keyword set along with a fast_pattern");
+                   "negated keyword set along with a 'fast_pattern'.");
         goto end;
     }
     if (cd->flags & DETECT_CONTENT_FAST_PATTERN_ONLY) {
         SCLogError(SC_ERR_INVALID_SIGNATURE, "can't have a relative "
-                   "keyword set along with a fast_pattern:only;");
+                   "keyword set along with 'fast_pattern:only;'.");
         goto end;
     }
     if (cd->flags & DETECT_CONTENT_OFFSET) {
         SCLogError(SC_ERR_INVALID_SIGNATURE, "can't mix offset "
-                   "with startswith");
+                   "with startswith.");
         goto end;
     }
 

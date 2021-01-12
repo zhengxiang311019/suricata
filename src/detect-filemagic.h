@@ -32,7 +32,6 @@ typedef struct DetectFilemagicThreadData {
 } DetectFilemagicThreadData;
 
 typedef struct DetectFilemagicData {
-    int thread_ctx_id;
     uint8_t *name; /** name of the file to match */
     BmCtx *bm_ctx; /** BM context */
     uint16_t len; /** name length */
@@ -40,7 +39,7 @@ typedef struct DetectFilemagicData {
 } DetectFilemagicData;
 
 /* prototypes */
-int FilemagicGlobalLookup(File *file);
+int FilemagicThreadLookup(magic_t *ctx, File *file);
 #endif
 void DetectFilemagicRegister (void);
 

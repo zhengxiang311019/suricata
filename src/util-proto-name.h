@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -32,9 +32,9 @@
 
 /** Lookup array to hold the information related to known protocol
  *  in /etc/protocols */
-char *known_proto[256];
+extern char *known_proto[256];
 
-uint8_t SCProtoNameValid(uint16_t);
+bool SCProtoNameValid(uint16_t);
 void SCProtoNameInit(void);
 void SCProtoNameDeInit(void);
 

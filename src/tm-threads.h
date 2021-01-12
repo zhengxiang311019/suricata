@@ -29,20 +29,38 @@
 #include "tm-threads-common.h"
 #include "tm-modules.h"
 
+#ifdef OS_WIN32
+static inline void SleepUsec(uint64_t usec)
+{
+    uint64_t msec = 1;
+    if (usec > 1000) {
+        msec = usec / 1000;
+    }
+    Sleep(msec);
+}
+#define SleepMsec(msec) Sleep((msec))
+#else
+#define SleepUsec(usec) usleep((usec))
+#define SleepMsec(msec) usleep((msec) * 1000)
+#endif
+
 #define TM_QUEUE_NAME_MAX 16
 #define TM_THREAD_NAME_MAX 16
 
-typedef TmEcode (*TmSlotFunc)(ThreadVars *, Packet *, void *, PacketQueue *,
-                        PacketQueue *);
+typedef TmEcode (*TmSlotFunc)(ThreadVars *, Packet *, void *);
 
 typedef struct TmSlot_ {
-    /* the TV holding this slot */
-    ThreadVars *tv;
-
     /* function pointers */
-    SC_ATOMIC_DECLARE(TmSlotFunc, SlotFunc);
+    union {
+        TmSlotFunc SlotFunc;
+        TmEcode (*PktAcqLoop)(ThreadVars *, void *, void *);
+        TmEcode (*Management)(ThreadVars *, void *);
+    };
+    /** linked list of slots, used when a pipeline has multiple slots
+     *  in a single thread. */
+    struct TmSlot_ *slot_next;
 
-    TmEcode (*PktAcqLoop)(ThreadVars *, void *, void *);
+    SC_ATOMIC_DECLARE(void *, slot_data);
 
     TmEcode (*SlotThreadInit)(ThreadVars *, const void *, void **);
     void (*SlotThreadExitPrintStats)(ThreadVars *, void *);
@@ -50,29 +68,8 @@ typedef struct TmSlot_ {
 
     /* data storage */
     const void *slot_initdata;
-    SC_ATOMIC_DECLARE(void *, slot_data);
-
-    /* queue filled by the SlotFunc with packets that will
-     * be processed futher _before_ the current packet.
-     * The locks in the queue are NOT used */
-    PacketQueue slot_pre_pq;
-
-    /* queue filled by the SlotFunc with packets that will
-     * be processed futher _after_ the current packet. The
-     * locks in the queue are NOT used */
-    PacketQueue slot_post_pq;
-
     /* store the thread module id */
     int tm_id;
-
-    /* slot id, only used my TmVarSlot to know what the first slot is */
-    int id;
-
-    /* linked list, only used when you have multiple slots(used by TmVarSlot) */
-    struct TmSlot_ *slot_next;
-
-    /* just called once, so not perf critical */
-    TmEcode (*Management)(ThreadVars *, void *);
 
 } TmSlot;
 
@@ -98,8 +95,8 @@ void TmThreadKillThreadsFamily(int family);
 void TmThreadKillThreads(void);
 void TmThreadClearThreadsFamily(int family);
 void TmThreadAppend(ThreadVars *, int);
-void TmThreadRemove(ThreadVars *, int);
 void TmThreadSetGroupName(ThreadVars *tv, const char *name);
+void TmThreadDumpThreads(void);
 
 TmEcode TmThreadSetCPUAffinity(ThreadVars *, uint16_t);
 TmEcode TmThreadSetThreadPriority(ThreadVars *, int);
@@ -118,10 +115,10 @@ void TmThreadCheckThreadState(void);
 TmEcode TmThreadWaitOnThreadInit(void);
 ThreadVars *TmThreadsGetCallingThread(void);
 
-int TmThreadsCheckFlag(ThreadVars *, uint16_t);
-void TmThreadsSetFlag(ThreadVars *, uint16_t);
-void TmThreadsUnsetFlag(ThreadVars *, uint16_t);
-void TmThreadWaitForFlag(ThreadVars *, uint16_t);
+int TmThreadsCheckFlag(ThreadVars *, uint32_t);
+void TmThreadsSetFlag(ThreadVars *, uint32_t);
+void TmThreadsUnsetFlag(ThreadVars *, uint32_t);
+void TmThreadWaitForFlag(ThreadVars *, uint32_t);
 
 TmEcode TmThreadsSlotVarRun (ThreadVars *tv, Packet *p, TmSlot *slot);
 
@@ -132,66 +129,77 @@ TmSlot *TmThreadGetFirstTmSlotForPartialPattern(const char *);
 
 uint32_t TmThreadCountThreadsByTmmFlags(uint8_t flags);
 
+static inline void TmThreadsCleanDecodePQ(PacketQueueNoLock *pq)
+{
+    while (1) {
+        Packet *p = PacketDequeueNoLock(pq);
+        if (unlikely(p == NULL))
+            break;
+        TmqhOutputPacketpool(NULL, p);
+    }
+}
+
+static inline void TmThreadsSlotProcessPktFail(ThreadVars *tv, TmSlot *s, Packet *p)
+{
+    if (p != NULL) {
+        TmqhOutputPacketpool(tv, p);
+    }
+    TmThreadsCleanDecodePQ(&tv->decode_pq);
+    if (tv->stream_pq_local) {
+        SCMutexLock(&tv->stream_pq_local->mutex_q);
+        TmqhReleasePacketsToPacketPool(tv->stream_pq_local);
+        SCMutexUnlock(&tv->stream_pq_local->mutex_q);
+    }
+    TmThreadsSetFlag(tv, THV_FAILED);
+}
+
+/**
+ *  \brief Handle timeout from the capture layer. Checks
+ *         stream_pq which may have been filled by the flow
+ *         manager.
+ *  \param s pipeline to run on these packets.
+ */
+static inline void TmThreadsHandleInjectedPackets(ThreadVars *tv)
+{
+    PacketQueue *pq = tv->stream_pq_local;
+    if (pq && pq->len > 0) {
+        while (1) {
+            SCMutexLock(&pq->mutex_q);
+            Packet *extra_p = PacketDequeue(pq);
+            SCMutexUnlock(&pq->mutex_q);
+            if (extra_p == NULL)
+                break;
+            TmEcode r = TmThreadsSlotVarRun(tv, extra_p, tv->tm_flowworker);
+            if (r == TM_ECODE_FAILED) {
+                TmThreadsSlotProcessPktFail(tv, tv->tm_flowworker, extra_p);
+                break;
+            }
+            tv->tmqh_out(tv, extra_p);
+        }
+    }
+}
+
 /**
  *  \brief Process the rest of the functions (if any) and queue.
  */
 static inline TmEcode TmThreadsSlotProcessPkt(ThreadVars *tv, TmSlot *s, Packet *p)
 {
-    TmEcode r = TM_ECODE_OK;
-
     if (s == NULL) {
         tv->tmqh_out(tv, p);
-        return r;
+        return TM_ECODE_OK;
     }
 
-    if (TmThreadsSlotVarRun(tv, p, s) == TM_ECODE_FAILED) {
-        TmqhOutputPacketpool(tv, p);
-        TmSlot *slot = s;
-        while (slot != NULL) {
-            SCMutexLock(&slot->slot_post_pq.mutex_q);
-            TmqhReleasePacketsToPacketPool(&slot->slot_post_pq);
-            SCMutexUnlock(&slot->slot_post_pq.mutex_q);
-
-            slot = slot->slot_next;
-        }
-        TmThreadsSetFlag(tv, THV_FAILED);
-        r = TM_ECODE_FAILED;
-
-    } else {
-        tv->tmqh_out(tv, p);
-
-        /* post process pq */
-        TmSlot *slot = s;
-        while (slot != NULL) {
-            if (slot->slot_post_pq.top != NULL) {
-                while (1) {
-                    SCMutexLock(&slot->slot_post_pq.mutex_q);
-                    Packet *extra_p = PacketDequeue(&slot->slot_post_pq);
-                    SCMutexUnlock(&slot->slot_post_pq.mutex_q);
-
-                    if (extra_p == NULL)
-                        break;
-
-                    if (slot->slot_next != NULL) {
-                        r = TmThreadsSlotVarRun(tv, extra_p, slot->slot_next);
-                        if (r == TM_ECODE_FAILED) {
-                            SCMutexLock(&slot->slot_post_pq.mutex_q);
-                            TmqhReleasePacketsToPacketPool(&slot->slot_post_pq);
-                            SCMutexUnlock(&slot->slot_post_pq.mutex_q);
-
-                            TmqhOutputPacketpool(tv, extra_p);
-                            TmThreadsSetFlag(tv, THV_FAILED);
-                            break;
-                        }
-                    }
-                    tv->tmqh_out(tv, extra_p);
-                }
-            } /* if (slot->slot_post_pq.top != NULL) */
-            slot = slot->slot_next;
-        } /* while (slot != NULL) */
+    TmEcode r = TmThreadsSlotVarRun(tv, p, s);
+    if (unlikely(r == TM_ECODE_FAILED)) {
+        TmThreadsSlotProcessPktFail(tv, s, p);
+        return TM_ECODE_FAILED;
     }
 
-    return r;
+    tv->tmqh_out(tv, p);
+
+    TmThreadsHandleInjectedPackets(tv);
+
+    return TM_ECODE_OK;
 }
 
 /** \brief inject packet if THV_CAPTURE_INJECT_PKT is set
@@ -199,18 +207,31 @@ static inline TmEcode TmThreadsSlotProcessPkt(ThreadVars *tv, TmSlot *s, Packet 
  *
  *  Meant for detect reload process that interupts an sleeping capture thread
  *  to force a packet through the engine to complete a reload */
-static inline void TmThreadsCaptureInjectPacket(ThreadVars *tv, TmSlot *slot, Packet *p)
+static inline void TmThreadsCaptureInjectPacket(ThreadVars *tv, Packet *p)
+{
+    TmThreadsUnsetFlag(tv, THV_CAPTURE_INJECT_PKT);
+    if (p == NULL)
+        p = PacketGetFromQueueOrAlloc();
+    if (p != NULL) {
+        p->flags |= PKT_PSEUDO_STREAM_END;
+        PKT_SET_SRC(p, PKT_SRC_CAPTURE_TIMEOUT);
+        if (TmThreadsSlotProcessPkt(tv, tv->tm_flowworker, p) != TM_ECODE_OK) {
+            TmqhOutputPacketpool(tv, p);
+        }
+    }
+}
+
+static inline void TmThreadsCaptureHandleTimeout(ThreadVars *tv, Packet *p)
 {
     if (TmThreadsCheckFlag(tv, THV_CAPTURE_INJECT_PKT)) {
-        TmThreadsUnsetFlag(tv, THV_CAPTURE_INJECT_PKT);
-        if (p == NULL)
-            p = PacketGetFromQueueOrAlloc();
-        if (p != NULL) {
-            p->flags |= PKT_PSEUDO_STREAM_END;
-            if (TmThreadsSlotProcessPkt(tv, slot, p) != TM_ECODE_OK) {
-                TmqhOutputPacketpool(tv, p);
-            }
-        }
+        TmThreadsCaptureInjectPacket(tv, p);
+    } else {
+        TmThreadsHandleInjectedPackets(tv);
+
+        /* packet could have been passed to us that we won't use
+         * return it to the pool. */
+        if (p != NULL)
+            tv->tmqh_out(tv, p);
     }
 }
 
@@ -218,8 +239,12 @@ void TmThreadsListThreads(void);
 int TmThreadsRegisterThread(ThreadVars *tv, const int type);
 void TmThreadsUnregisterThread(const int id);
 int TmThreadsInjectPacketsById(Packet **, int id);
+void TmThreadsInjectFlowById(Flow *f, const int id);
 
+void TmThreadsInitThreadsTimestamp(const struct timeval *ts);
 void TmThreadsSetThreadTimestamp(const int id, const struct timeval *ts);
-void TmreadsGetMinimalTimestamp(struct timeval *ts);
+void TmThreadsGetMinimalTimestamp(struct timeval *ts);
+uint16_t TmThreadsGetWorkerThreadMax(void);
+bool TmThreadsTimeSubsysIsReady(void);
 
 #endif /* __TM_THREADS_H__ */

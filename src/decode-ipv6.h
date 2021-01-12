@@ -47,7 +47,7 @@ typedef struct IPV6Hdr_
         } ip6_un2;
         uint16_t ip6_addrs[16];
     } ip6_hdrun2;
-} __attribute__((__packed__)) IPV6Hdr;
+} IPV6Hdr;
 
 #define s_ip6_src                       ip6_hdrun2.ip6_un2.ip6_src
 #define s_ip6_dst                       ip6_hdrun2.ip6_un2.ip6_dst
@@ -69,7 +69,8 @@ typedef struct IPV6Hdr_
 #define IPV6_SET_RAW_VER(ip6h, value)   ((ip6h)->s_ip6_vfc = (((ip6h)->s_ip6_vfc & 0x0f) | (value << 4)))
 #define IPV6_SET_RAW_NH(ip6h, value)    ((ip6h)->s_ip6_nxt = (value))
 
-#define IPV6_SET_L4PROTO(p,proto)       (p)->ip6vars.l4proto = proto
+#define IPV6_SET_L4PROTO(p,proto)       (p)->ip6vars.l4proto = (proto)
+#define IPV6_SET_EXTHDRS_LEN(p,len)     (p)->ip6vars.exthdrs_len = (len)
 
 
 /* ONLY call these functions after making sure that:
@@ -88,9 +89,11 @@ typedef struct IPV6Hdr_
     IPV6_GET_RAW_PLEN((p)->ip6h)
 #define IPV6_GET_HLIM(p) \
     (IPV6_GET_RAW_HLIM((p)->ip6h))
-/* XXX */
+
 #define IPV6_GET_L4PROTO(p) \
     ((p)->ip6vars.l4proto)
+#define IPV6_GET_EXTHDRS_LEN(p) \
+    ((p)->ip6vars.exthdrs_len)
 
 /** \brief get the highest proto/next header field we know */
 //#define IPV6_GET_UPPER_PROTO(p)         (p)->ip6eh.ip6_exthdrs_cnt ?
@@ -99,16 +102,16 @@ typedef struct IPV6Hdr_
 /* helper structure with parsed ipv6 info */
 typedef struct IPV6Vars_
 {
-    uint8_t ip_opts_len;
-    uint8_t l4proto;      /* the proto after the extension headers
-                            * store while decoding so we don't have
-                            * to loop through the exthdrs all the time */
+    uint8_t l4proto;       /**< the proto after the extension headers
+                            *   store while decoding so we don't have
+                            *   to loop through the exthdrs all the time */
+    uint16_t exthdrs_len;  /**< length of the exthdrs */
 } IPV6Vars;
 
 #define CLEAR_IPV6_PACKET(p) do { \
     (p)->ip6h = NULL; \
-    (p)->ip6vars.ip_opts_len = 0; \
     (p)->ip6vars.l4proto = 0; \
+    (p)->ip6vars.exthdrs_len = 0; \
     memset(&(p)->ip6eh, 0x00, sizeof((p)->ip6eh)); \
 } while (0)
 
@@ -210,11 +213,11 @@ typedef struct IPV6GenOptHdr_
 
 typedef struct IPV6ExtHdrs_
 {
-    _Bool rh_set;
+    bool rh_set;
     uint8_t rh_type;
 
-    _Bool fh_set;
-    _Bool fh_more_frags_set;
+    bool fh_set;
+    bool fh_more_frags_set;
     uint8_t fh_nh;
 
     uint8_t fh_prev_nh;

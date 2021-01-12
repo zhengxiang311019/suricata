@@ -45,24 +45,25 @@
 
 #include "detect-engine-payload.h"
 #include "detect-engine-dcepayload.h"
-#include "detect-engine-uri.h"
+#include "detect-dns-opcode.h"
 #include "detect-dns-query.h"
 #include "detect-tls-sni.h"
+#include "detect-tls-certs.h"
 #include "detect-tls-cert-fingerprint.h"
 #include "detect-tls-cert-issuer.h"
 #include "detect-tls-cert-subject.h"
 #include "detect-tls-cert-serial.h"
 #include "detect-tls-ja3-hash.h"
 #include "detect-tls-ja3-string.h"
+#include "detect-tls-ja3s-hash.h"
+#include "detect-tls-ja3s-string.h"
 #include "detect-engine-state.h"
 #include "detect-engine-analyzer.h"
-#include "detect-engine-filedata.h"
 
 #include "detect-http-cookie.h"
 #include "detect-http-method.h"
 #include "detect-http-ua.h"
-#include "detect-http-hh.h"
-#include "detect-http-hrh.h"
+#include "detect-http-host.h"
 
 #include "detect-nfs-procedure.h"
 #include "detect-nfs-version.h"
@@ -70,17 +71,19 @@
 #include "detect-engine-event.h"
 #include "decode.h"
 
+#include "detect-config.h"
+
 #include "detect-smb-share.h"
 
 #include "detect-base64-decode.h"
 #include "detect-base64-data.h"
 #include "detect-ipopts.h"
-#include "detect-flags.h"
+#include "detect-tcp-flags.h"
 #include "detect-fragbits.h"
 #include "detect-fragoffset.h"
 #include "detect-gid.h"
-#include "detect-ack.h"
-#include "detect-seq.h"
+#include "detect-tcp-ack.h"
+#include "detect-tcp-seq.h"
 #include "detect-content.h"
 #include "detect-uricontent.h"
 #include "detect-pcre.h"
@@ -88,6 +91,7 @@
 #include "detect-nocase.h"
 #include "detect-rawbytes.h"
 #include "detect-bytetest.h"
+#include "detect-bytemath.h"
 #include "detect-bytejump.h"
 #include "detect-sameip.h"
 #include "detect-l3proto.h"
@@ -106,7 +110,7 @@
 #include "detect-msg.h"
 #include "detect-rev.h"
 #include "detect-flow.h"
-#include "detect-window.h"
+#include "detect-tcp-window.h"
 #include "detect-ftpbounce.h"
 #include "detect-isdataat.h"
 #include "detect-id.h"
@@ -120,6 +124,8 @@
 #include "detect-filesha1.h"
 #include "detect-filesha256.h"
 #include "detect-filesize.h"
+#include "detect-dataset.h"
+#include "detect-datarep.h"
 #include "detect-dsize.h"
 #include "detect-flowvar.h"
 #include "detect-flowint.h"
@@ -137,6 +143,7 @@
 #include "detect-icode.h"
 #include "detect-icmp-id.h"
 #include "detect-icmp-seq.h"
+#include "detect-icmpv4hdr.h"
 #include "detect-dce-iface.h"
 #include "detect-dce-opnum.h"
 #include "detect-dce-stub-data.h"
@@ -152,21 +159,10 @@
 #include "detect-http-uri.h"
 #include "detect-http-protocol.h"
 #include "detect-http-start.h"
-#include "detect-http-raw-uri.h"
 #include "detect-http-stat-msg.h"
 #include "detect-http-request-line.h"
 #include "detect-http-response-line.h"
-#include "detect-engine-hcbd.h"
-#include "detect-engine-hsbd.h"
-#include "detect-engine-hrhd.h"
-#include "detect-engine-hmd.h"
-#include "detect-engine-hcd.h"
-#include "detect-engine-hrud.h"
-#include "detect-engine-hsmd.h"
-#include "detect-engine-hscd.h"
-#include "detect-engine-hua.h"
-#include "detect-engine-hhhd.h"
-#include "detect-engine-hrhhd.h"
+#include "detect-http2.h"
 #include "detect-byte-extract.h"
 #include "detect-file-data.h"
 #include "detect-pkt-data.h"
@@ -179,12 +175,49 @@
 #include "detect-app-layer-protocol.h"
 #include "detect-template.h"
 #include "detect-template2.h"
+#include "detect-tcphdr.h"
+#include "detect-tcpmss.h"
+#include "detect-udphdr.h"
+#include "detect-icmpv6hdr.h"
+#include "detect-icmpv6-mtu.h"
+#include "detect-ipv4hdr.h"
+#include "detect-ipv6hdr.h"
 #include "detect-krb5-cname.h"
 #include "detect-krb5-errcode.h"
 #include "detect-krb5-msgtype.h"
 #include "detect-krb5-sname.h"
+#include "detect-sip-method.h"
+#include "detect-sip-uri.h"
+#include "detect-sip-protocol.h"
+#include "detect-sip-stat-code.h"
+#include "detect-sip-stat-msg.h"
+#include "detect-sip-request-line.h"
+#include "detect-sip-response-line.h"
+#include "detect-rfb-secresult.h"
+#include "detect-rfb-sectype.h"
+#include "detect-rfb-name.h"
 #include "detect-target.h"
 #include "detect-template-rust-buffer.h"
+#include "detect-snmp-version.h"
+#include "detect-snmp-community.h"
+#include "detect-snmp-pdu_type.h"
+#include "detect-mqtt-type.h"
+#include "detect-mqtt-flags.h"
+#include "detect-mqtt-qos.h"
+#include "detect-mqtt-protocol-version.h"
+#include "detect-mqtt-reason-code.h"
+#include "detect-mqtt-connect-flags.h"
+#include "detect-mqtt-connect-clientid.h"
+#include "detect-mqtt-connect-username.h"
+#include "detect-mqtt-connect-password.h"
+#include "detect-mqtt-connect-willtopic.h"
+#include "detect-mqtt-connect-willmessage.h"
+#include "detect-mqtt-connack-sessionpresent.h"
+#include "detect-mqtt-publish-topic.h"
+#include "detect-mqtt-publish-message.h"
+#include "detect-mqtt-subscribe-topic.h"
+#include "detect-mqtt-unsubscribe-topic.h"
+
 #include "detect-template-buffer.h"
 #include "detect-bypass.h"
 #include "detect-ftpdata.h"
@@ -192,7 +225,12 @@
 
 #include "detect-transform-compress-whitespace.h"
 #include "detect-transform-strip-whitespace.h"
+#include "detect-transform-md5.h"
+#include "detect-transform-sha1.h"
 #include "detect-transform-sha256.h"
+#include "detect-transform-dotprefix.h"
+#include "detect-transform-pcrexform.h"
+#include "detect-transform-urldecode.h"
 
 #include "util-rule-vars.h"
 
@@ -208,6 +246,10 @@
 #include "detect-ssh-proto-version.h"
 #include "detect-ssh-software.h"
 #include "detect-ssh-software-version.h"
+#include "detect-ssh-hassh.h"
+#include "detect-ssh-hassh-server.h"
+#include "detect-ssh-hassh-string.h"
+#include "detect-ssh-hassh-server-string.h"
 #include "detect-http-stat-code.h"
 #include "detect-ssl-version.h"
 #include "detect-ssl-state.h"
@@ -245,7 +287,7 @@
 
 static void PrintFeatureList(const SigTableElmt *e, char sep)
 {
-    const uint8_t flags = e->flags;
+    const uint16_t flags = e->flags;
 
     int prev = 0;
     if (flags & SIGMATCH_NOOPT) {
@@ -262,6 +304,18 @@ static void PrintFeatureList(const SigTableElmt *e, char sep)
         if (prev == 1)
             printf("%c", sep);
         printf("compatible with decoder event only rule");
+        prev = 1;
+    }
+    if (flags & SIGMATCH_INFO_CONTENT_MODIFIER) {
+        if (prev == 1)
+            printf("%c", sep);
+        printf("content modifier");
+        prev = 1;
+    }
+    if (flags & SIGMATCH_INFO_STICKY_BUFFER) {
+        if (prev == 1)
+            printf("%c", sep);
+        printf("sticky buffer");
         prev = 1;
     }
     if (e->Transform) {
@@ -289,7 +343,10 @@ static void SigMultilinePrint(int i, const char *prefix)
     printf("%sFeatures: ", prefix);
     PrintFeatureList(&sigmatch_table[i], ',');
     if (sigmatch_table[i].url) {
-        printf("\n%sDocumentation: %s", prefix, sigmatch_table[i].url);
+        printf("\n%sDocumentation: %s%s", prefix, GetDocURL(), sigmatch_table[i].url);
+    }
+    if (sigmatch_table[i].alternative) {
+        printf("\n%sReplaced by: %s", prefix, sigmatch_table[sigmatch_table[i].alternative].name);
     }
     printf("\n");
 }
@@ -334,7 +391,7 @@ void SigTableList(const char *keyword)
                 PrintFeatureList(&sigmatch_table[i], ':');
                 printf(";");
                 if (sigmatch_table[i].url) {
-                    printf("%s", sigmatch_table[i].url);
+                    printf("%s%s", GetDocURL(), sigmatch_table[i].url);
                 }
                 printf(";");
                 printf("\n");
@@ -403,7 +460,6 @@ void SigTableSetup(void)
     DetectHttpRawHeaderRegister();
     DetectHttpMethodRegister();
     DetectHttpCookieRegister();
-    DetectHttpRawUriRegister();
 
     DetectFilenameRegister();
     DetectFileextRegister();
@@ -416,12 +472,13 @@ void SigTableSetup(void)
 
     DetectHttpUARegister();
     DetectHttpHHRegister();
-    DetectHttpHRHRegister();
 
     DetectHttpStatMsgRegister();
     DetectHttpStatCodeRegister();
+    DetectHttp2Register();
 
     DetectDnsQueryRegister();
+    DetectDnsOpcodeRegister();
     DetectModbusRegister();
     DetectCipServiceRegister();
     DetectEnipCommandRegister();
@@ -432,9 +489,12 @@ void SigTableSetup(void)
     DetectTlsSubjectRegister();
     DetectTlsSerialRegister();
     DetectTlsFingerprintRegister();
+    DetectTlsCertsRegister();
 
     DetectTlsJa3HashRegister();
     DetectTlsJa3StringRegister();
+    DetectTlsJa3SHashRegister();
+    DetectTlsJa3SStringRegister();
 
     DetectAppLayerEventRegister();
     /* end of order dependent regs */
@@ -445,6 +505,7 @@ void SigTableSetup(void)
     DetectRawbytesRegister();
     DetectBytetestRegister();
     DetectBytejumpRegister();
+    DetectBytemathRegister();
     DetectSameipRegister();
     DetectGeoipRegister();
     DetectL3ProtoRegister();
@@ -461,6 +522,8 @@ void SigTableSetup(void)
     DetectIsdataatRegister();
     DetectIdRegister();
     DetectDsizeRegister();
+    DetectDatasetRegister();
+    DetectDatarepRegister();
     DetectFlowvarRegister();
     DetectFlowintRegister();
     DetectPktvarRegister();
@@ -484,6 +547,7 @@ void SigTableSetup(void)
     DetectICodeRegister();
     DetectIcmpIdRegister();
     DetectIcmpSeqRegister();
+    DetectIcmpv4HdrRegister();
     DetectDceIfaceRegister();
     DetectDceOpnumRegister();
     DetectDceStubDataRegister();
@@ -502,6 +566,10 @@ void SigTableSetup(void)
     DetectSshVersionRegister();
     DetectSshSoftwareRegister();
     DetectSshSoftwareVersionRegister();
+    DetectSshHasshRegister();
+    DetectSshHasshServerRegister();
+    DetectSshHasshStringRegister();
+    DetectSshHasshServerStringRegister();
     DetectSslStateRegister();
     DetectSslVersionRegister();
     DetectByteExtractRegister();
@@ -514,28 +582,71 @@ void SigTableSetup(void)
     DetectBase64DataRegister();
     DetectTemplateRegister();
     DetectTemplate2Register();
+    DetectTcphdrRegister();
+    DetectUdphdrRegister();
+    DetectTcpmssRegister();
+    DetectICMPv6hdrRegister();
+    DetectICMPv6mtuRegister();
+    DetectIpv4hdrRegister();
+    DetectIpv6hdrRegister();
     DetectKrb5CNameRegister();
     DetectKrb5ErrCodeRegister();
     DetectKrb5MsgTypeRegister();
     DetectKrb5SNameRegister();
+    DetectSipMethodRegister();
+    DetectSipUriRegister();
+    DetectSipProtocolRegister();
+    DetectSipStatCodeRegister();
+    DetectSipStatMsgRegister();
+    DetectSipRequestLineRegister();
+    DetectSipResponseLineRegister();
+    DetectRfbSecresultRegister();
+    DetectRfbSectypeRegister();
+    DetectRfbNameRegister();
     DetectTargetRegister();
     DetectTemplateRustBufferRegister();
+    DetectSNMPVersionRegister();
+    DetectSNMPCommunityRegister();
+    DetectSNMPPduTypeRegister();
+    DetectMQTTTypeRegister();
+    DetectMQTTFlagsRegister();
+    DetectMQTTQosRegister();
+    DetectMQTTProtocolVersionRegister();
+    DetectMQTTReasonCodeRegister();
+    DetectMQTTConnectFlagsRegister();
+    DetectMQTTConnectClientIDRegister();
+    DetectMQTTConnectUsernameRegister();
+    DetectMQTTConnectPasswordRegister();
+    DetectMQTTConnectWillTopicRegister();
+    DetectMQTTConnectWillMessageRegister();
+    DetectMQTTConnackSessionPresentRegister();
+    DetectMQTTPublishTopicRegister();
+    DetectMQTTPublishMessageRegister();
+    DetectMQTTSubscribeTopicRegister();
+    DetectMQTTUnsubscribeTopicRegister();
+
     DetectTemplateBufferRegister();
     DetectBypassRegister();
+    DetectConfigRegister();
 
     DetectTransformCompressWhitespaceRegister();
     DetectTransformStripWhitespaceRegister();
+    DetectTransformMd5Register();
+    DetectTransformSha1Register();
     DetectTransformSha256Register();
+    DetectTransformDotPrefixRegister();
+    DetectTransformPcrexformRegister();
+    DetectTransformUrlDecodeRegister();
 
     /* close keyword registration */
     DetectBufferTypeCloseRegistration();
 }
 
+#ifdef UNITTESTS
 void SigTableRegisterTests(void)
 {
     /* register the tests */
-    int i = 0;
-    for (i = 0; i < DETECT_TBLSIZE; i++) {
+    for (int i = 0; i < DETECT_TBLSIZE; i++) {
         g_ut_modules++;
         if (sigmatch_table[i].RegisterTests != NULL) {
             sigmatch_table[i].RegisterTests();
@@ -550,3 +661,4 @@ void SigTableRegisterTests(void)
         }
     }
 }
+#endif

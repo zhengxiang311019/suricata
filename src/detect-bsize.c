@@ -1,4 +1,4 @@
-/* Copyright (C) 2017 Open Information Security Foundation
+/* Copyright (C) 2017-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -38,7 +38,7 @@
 
 /*prototypes*/
 static int DetectBsizeSetup (DetectEngineCtx *, Signature *, const char *);
-static void DetectBsizeFree (void *);
+static void DetectBsizeFree (DetectEngineCtx *, void *);
 #ifdef UNITTESTS
 static void DetectBsizeRegisterTests (void);
 #endif
@@ -51,7 +51,7 @@ void DetectBsizeRegister(void)
 {
     sigmatch_table[DETECT_BSIZE].name = "bsize";
     sigmatch_table[DETECT_BSIZE].desc = "match on the length of a buffer";
-    sigmatch_table[DETECT_BSIZE].url = DOC_URL DOC_VERSION "/rules/payload-keywords.html#bsize";
+    sigmatch_table[DETECT_BSIZE].url = "/rules/payload-keywords.html#bsize";
     sigmatch_table[DETECT_BSIZE].Match = NULL;
     sigmatch_table[DETECT_BSIZE].Setup = DetectBsizeSetup;
     sigmatch_table[DETECT_BSIZE].Free = DetectBsizeFree;
@@ -177,7 +177,7 @@ static DetectBsizeData *DetectBsizeParse (const char *str)
     char str1[11], *p = str1;
     memset(str1, 0, sizeof(str1));
     while (*str && isdigit(*str)) {
-        if (p - str1 >= (int)sizeof(str1))
+        if (p - str1 >= ((int)sizeof(str1) - 1))
             return NULL;
         *p++ = *str++;
     }
@@ -224,7 +224,7 @@ static DetectBsizeData *DetectBsizeParse (const char *str)
         p = str2;
         memset(str2, 0, sizeof(str2));
         while (*str && isdigit(*str)) {
-            if (p - str2 >= (int)sizeof(str2))
+            if (p - str2 >= ((int)sizeof(str2) - 1))
                 return NULL;
             *p++ = *str++;
         }
@@ -281,6 +281,9 @@ static int DetectBsizeSetup (DetectEngineCtx *de_ctx, Signature *s, const char *
     SCEnter();
     SigMatch *sm = NULL;
 
+    if (DetectBufferGetActiveList(de_ctx, s) == -1)
+        SCReturnInt(-1);
+
     int list = s->init_data->list;
     if (list == DETECT_SM_LIST_NOTSET)
         SCReturnInt(-1);
@@ -299,7 +302,7 @@ static int DetectBsizeSetup (DetectEngineCtx *de_ctx, Signature *s, const char *
     SCReturnInt(0);
 
 error:
-    DetectBsizeFree(bsz);
+    DetectBsizeFree(de_ctx, bsz);
     SCReturnInt(-1);
 }
 
@@ -308,7 +311,7 @@ error:
  *
  * \param ptr pointer to DetectBsizeData
  */
-void DetectBsizeFree(void *ptr)
+void DetectBsizeFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     if (ptr == NULL)
         return;

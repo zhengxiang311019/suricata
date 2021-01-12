@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -74,9 +74,13 @@ typedef struct PcapFileFileVars_
     struct bpf_program filter;
 
     PcapFileSharedVars *shared;
-} PcapFileFileVars;
 
-typedef int (*Decoder)(ThreadVars *, DecodeThreadVars *, Packet *, uint8_t *, uint32_t, PacketQueue *);
+    /* fields used to get the first packet's timestamp early,
+     * so it can be used to setup the time subsys. */
+    const u_char *first_pkt_data;
+    struct pcap_pkthdr *first_pkt_hdr;
+    struct timeval first_pkt_ts;
+} PcapFileFileVars;
 
 /**
  * Dispatch a file for processing, where the information necessary to process that
@@ -106,6 +110,6 @@ void CleanupPcapFileFileVars(PcapFileFileVars *pfv);
  * @param decoder Pointer to decoder to set if valid
  * @return TM_ECODE_OK if valid datalink type and decoder has been set.
  */
-TmEcode ValidateLinkType(int datalink, Decoder *decoder);
+TmEcode ValidateLinkType(int datalink, DecoderFunc *decoder);
 
 #endif /* __SOURCE_PCAP_FILE_HELPER_H__ */

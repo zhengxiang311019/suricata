@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2014 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -209,6 +209,15 @@ static TmEcode AlertSyslogIPv4(ThreadVars *tv, const Packet *p, void *data)
     if (p->alerts.cnt == 0)
         return TM_ECODE_OK;
 
+    char proto[16] = "";
+    char *protoptr;
+    if (SCProtoNameValid(IPV4_GET_IPPROTO(p))) {
+        protoptr = known_proto[IPV4_GET_IPPROTO(p)];
+    } else {
+        snprintf(proto, sizeof(proto), "PROTO:%03" PRIu32, IPV4_GET_IPPROTO(p));
+        protoptr = proto;
+    }
+
     /* Not sure if this mutex is needed around calls to syslog. */
     SCMutexLock(&ast->file_ctx->fp_mutex);
 
@@ -229,19 +238,11 @@ static TmEcode AlertSyslogIPv4(ThreadVars *tv, const Packet *p, void *data)
             action = "[wDrop] ";
         }
 
-        if (SCProtoNameValid(IPV4_GET_IPPROTO(p)) == TRUE) {
-            syslog(alert_syslog_level, "%s[%" PRIu32 ":%" PRIu32 ":%"
-                    PRIu32 "] %s [Classification: %s] [Priority: %"PRIu32"]"
-                    " {%s} %s:%" PRIu32 " -> %s:%" PRIu32 "", action, pa->s->gid,
-                    pa->s->id, pa->s->rev, pa->s->msg, pa->s->class_msg, pa->s->prio,
-                    known_proto[IPV4_GET_IPPROTO(p)], srcip, p->sp, dstip, p->dp);
-        } else {
-            syslog(alert_syslog_level, "%s[%" PRIu32 ":%" PRIu32 ":%"
-                    PRIu32 "] %s [Classification: %s] [Priority: %"PRIu32"]"
-                    " {PROTO:%03" PRIu32 "} %s:%" PRIu32 " -> %s:%" PRIu32 "",
-                    action, pa->s->gid, pa->s->id, pa->s->rev, pa->s->msg, pa->s->class_msg,
-                    pa->s->prio, IPV4_GET_IPPROTO(p), srcip, p->sp, dstip, p->dp);
-        }
+        syslog(alert_syslog_level, "%s[%" PRIu32 ":%" PRIu32 ":%"
+                PRIu32 "] %s [Classification: %s] [Priority: %"PRIu32"]"
+                " {%s} %s:%" PRIu32 " -> %s:%" PRIu32 "", action, pa->s->gid,
+                pa->s->id, pa->s->rev, pa->s->msg, pa->s->class_msg, pa->s->prio,
+                protoptr,  srcip, p->sp, dstip, p->dp);
     }
     SCMutexUnlock(&ast->file_ctx->fp_mutex);
 
@@ -266,6 +267,15 @@ static TmEcode AlertSyslogIPv6(ThreadVars *tv, const Packet *p, void *data)
     if (p->alerts.cnt == 0)
         return TM_ECODE_OK;
 
+    char proto[16] = "";
+    char *protoptr;
+    if (SCProtoNameValid(IPV6_GET_L4PROTO(p))) {
+        protoptr = known_proto[IPV6_GET_L4PROTO(p)];
+    } else {
+        snprintf(proto, sizeof(proto), "PROTO:03%" PRIu32, IPV6_GET_L4PROTO(p));
+        protoptr = proto;
+    }
+
     SCMutexLock(&ast->file_ctx->fp_mutex);
 
     for (i = 0; i < p->alerts.cnt; i++) {
@@ -285,21 +295,12 @@ static TmEcode AlertSyslogIPv6(ThreadVars *tv, const Packet *p, void *data)
             action = "[wDrop] ";
         }
 
-        if (SCProtoNameValid(IPV6_GET_L4PROTO(p)) == TRUE) {
-            syslog(alert_syslog_level, "%s[%" PRIu32 ":%" PRIu32 ":%"
-                    "" PRIu32 "] %s [Classification: %s] [Priority: %"
-                    "" PRIu32 "] {%s} %s:%" PRIu32 " -> %s:%" PRIu32 "",
-                    action, pa->s->gid, pa->s->id, pa->s->rev, pa->s->msg, pa->s->class_msg,
-                    pa->s->prio, known_proto[IPV6_GET_L4PROTO(p)], srcip, p->sp,
-                    dstip, p->dp);
-
-        } else {
-            syslog(alert_syslog_level, "%s[%" PRIu32 ":%" PRIu32 ":%"
-                    "" PRIu32 "] %s [Classification: %s] [Priority: %"
-                    "" PRIu32 "] {PROTO:%03" PRIu32 "} %s:%" PRIu32 " -> %s:%" PRIu32 "",
-                    action, pa->s->gid, pa->s->id, pa->s->rev, pa->s->msg, pa->s->class_msg,
-                    pa->s->prio, IPV6_GET_L4PROTO(p), srcip, p->sp, dstip, p->dp);
-        }
+        syslog(alert_syslog_level, "%s[%" PRIu32 ":%" PRIu32 ":%"
+                "" PRIu32 "] %s [Classification: %s] [Priority: %"
+                "" PRIu32 "] {%s} %s:%" PRIu32 " -> %s:%" PRIu32 "",
+                action, pa->s->gid, pa->s->id, pa->s->rev, pa->s->msg, pa->s->class_msg,
+                pa->s->prio, protoptr, srcip, p->sp,
+                dstip, p->dp);
 
     }
     SCMutexUnlock(&ast->file_ctx->fp_mutex);
@@ -313,8 +314,6 @@ static TmEcode AlertSyslogIPv6(ThreadVars *tv, const Packet *p, void *data)
  * \param tv    Pointer to the threadvars
  * \param p     Pointer to the packet
  * \param data  pointer to the AlertSyslogThread
- * \param pq    pointer the to packet queue
- * \param postpq pointer to the post processed packet queue
  *
  * \return On succes return TM_ECODE_OK
  */
@@ -331,7 +330,7 @@ static TmEcode AlertSyslogDecoderEvent(ThreadVars *tv, const Packet *p, void *da
 
     char temp_buf_hdr[512];
     char temp_buf_pkt[65] = "";
-    char temp_buf_tail[32];
+    char temp_buf_tail[64];
     char alert[2048] = "";
 
     for (i = 0; i < p->alerts.cnt; i++) {

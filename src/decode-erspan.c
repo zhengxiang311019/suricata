@@ -1,4 +1,4 @@
-/* Copyright (C) 2015 Open Information Security Foundation
+/* Copyright (C) 2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -27,7 +27,7 @@
  *
  * \author Victor Julien <victor@inliniac.net>
  *
- * Decodes ERSPAN
+ * Decodes ERSPAN Types I and II
  */
 
 #include "suricata-common.h"
@@ -40,10 +40,39 @@
 #include "util-debug.h"
 
 /**
- * \brief Function to decode ERSPAN packets
+ * \brief Functions to decode ERSPAN Type I and II packets
  */
 
-int DecodeERSPAN(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt, uint32_t len, PacketQueue *pq)
+/*
+ * \brief ERSPAN Type I was configurable in 5.0.x but is no longer configurable.
+ *
+ * Issue a warning if a configuration setting is found.
+ */
+void DecodeERSPANConfig(void)
+{
+    int enabled = 0;
+    if (ConfGetBool("decoder.erspan.typeI.enabled", &enabled) == 1) {
+        SCLogWarning(SC_WARN_ERSPAN_CONFIG,
+                     "ERSPAN Type I is no longer configurable and it is always"
+                     " enabled; ignoring configuration setting.");
+    }
+}
+
+/**
+ * \brief ERSPAN Type I
+ */
+int DecodeERSPANTypeI(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
+                      const uint8_t *pkt, uint32_t len)
+{
+    StatsIncr(tv, dtv->counter_erspan);
+
+    return DecodeEthernet(tv, dtv, p, pkt, len);
+}
+
+/**
+ * \brief ERSPAN Type II
+ */
+int DecodeERSPAN(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, const uint8_t *pkt, uint32_t len)
 {
     StatsIncr(tv, dtv->counter_erspan);
 
@@ -64,7 +93,7 @@ int DecodeERSPAN(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt,
         return TM_ECODE_FAILED;
     }
 
-    if (vlan_id > 0 && dtv->vlan_disabled == 0) {
+    if (vlan_id > 0) {
         if (p->vlan_idx >= 2) {
             ENGINE_SET_EVENT(p,ERSPAN_TOO_MANY_VLAN_LAYERS);
             return TM_ECODE_FAILED;
@@ -73,7 +102,7 @@ int DecodeERSPAN(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt,
         p->vlan_idx++;
     }
 
-    return DecodeEthernet(tv, dtv, p, pkt + sizeof(ErspanHdr), len - sizeof(ErspanHdr), pq);
+    return DecodeEthernet(tv, dtv, p, pkt + sizeof(ErspanHdr), len - sizeof(ErspanHdr));
 }
 
 /**

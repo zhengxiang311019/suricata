@@ -29,6 +29,7 @@
 #include "util-debug.h"
 #include "util-ip.h"
 #include "util-radix-tree.h"
+#include "util-byte.h"
 #include "stream-tcp-private.h"
 #include "stream-tcp-reassemble.h"
 
@@ -77,8 +78,7 @@ static void *SCHInfoAllocUserDataOSPolicy(const char *host_os)
     int *user_data = NULL;
 
     if ( (user_data = SCMalloc(sizeof(int))) == NULL) {
-        SCLogError(SC_ERR_FATAL, "Error allocating memory. Exiting");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Error allocating memory. Exiting");
     }
 
     /* the host os flavour that has to be sent as user data */
@@ -156,24 +156,23 @@ int SCHInfoAddHostOSInfo(const char *host_os, const char *host_os_ip_range, int 
     }
 
     if ( (ip_str = SCStrdup(host_os_ip_range)) == NULL) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Error allocating memory");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Error allocating memory");
     }
 
     /* check if we have more addresses in the host_os_ip_range */
-    if ((ip_str_rem = index(ip_str, ',')) != NULL) {
+    if ((ip_str_rem = strchr(ip_str, ',')) != NULL) {
         ip_str_rem[0] = '\0';
         ip_str_rem++;
         recursive = TRUE;
     }
 
     /* check if we have received a netblock */
-    if ( (netmask_str = index(ip_str, '/')) != NULL) {
+    if ( (netmask_str = strchr(ip_str, '/')) != NULL) {
         netmask_str[0] = '\0';
         netmask_str++;
     }
 
-    if (index(ip_str, ':') == NULL) {
+    if (strchr(ip_str, ':') == NULL) {
         /* if we are here, we have an IPV4 address */
         if ( (ipv4_addr = ValidateIPV4Address(ip_str)) == NULL) {
             SCLogError(SC_ERR_INVALID_IPV4_ADDR, "Invalid IPV4 address");
@@ -186,8 +185,7 @@ int SCHInfoAddHostOSInfo(const char *host_os, const char *host_os_ip_range, int 
             SCRadixAddKeyIPV4((uint8_t *)ipv4_addr, sc_hinfo_tree,
                               (void *)user_data);
         } else {
-            netmask_value = atoi(netmask_str);
-            if (netmask_value < 0 || netmask_value > 32) {
+            if (StringParseI32RangeCheck(&netmask_value, 10, 0, (const char *)netmask_str, 0, 32) < 0) {
                 SCLogError(SC_ERR_INVALID_IP_NETBLOCK, "Invalid IPV4 Netblock");
                 SCHInfoFreeUserDataOSPolicy(user_data);
                 SCFree(ipv4_addr);
@@ -212,8 +210,7 @@ int SCHInfoAddHostOSInfo(const char *host_os, const char *host_os_ip_range, int 
             SCRadixAddKeyIPV6((uint8_t *)ipv6_addr, sc_hinfo_tree,
                               (void *)user_data);
         } else {
-            netmask_value = atoi(netmask_str);
-            if (netmask_value < 0 || netmask_value > 128) {
+            if (StringParseI32RangeCheck(&netmask_value, 10, 0, (const char *)netmask_str, 0, 128) < 0) {
                 SCLogError(SC_ERR_INVALID_IP_NETBLOCK, "Invalid IPV6 Netblock");
                 SCHInfoFreeUserDataOSPolicy(user_data);
                 SCFree(ipv6_addr);
@@ -252,10 +249,10 @@ int SCHInfoGetHostOSFlavour(const char *ip_addr_str)
     struct in6_addr *ipv6_addr = NULL;
     void *user_data = NULL;
 
-    if (ip_addr_str == NULL || index(ip_addr_str, '/') != NULL)
+    if (ip_addr_str == NULL || strchr(ip_addr_str, '/') != NULL)
         return -1;
 
-    if (index(ip_addr_str, ':') != NULL) {
+    if (strchr(ip_addr_str, ':') != NULL) {
         if ( (ipv6_addr = ValidateIPV6Address(ip_addr_str)) == NULL) {
             SCLogError(SC_ERR_INVALID_IPV4_ADDR, "Invalid IPV4 address");
             return -1;
@@ -344,7 +341,7 @@ void SCHInfoLoadFromConfig(void)
         ConfNode *host;
         TAILQ_FOREACH(host, &policy->head, next) {
             int is_ipv4 = 1;
-            if (host->val != NULL && index(host->val, ':') != NULL)
+            if (host->val != NULL && strchr(host->val, ':') != NULL)
                 is_ipv4 = 0;
             if (SCHInfoAddHostOSInfo(policy->name, host->val, is_ipv4) == -1) {
                 SCLogError(SC_ERR_INVALID_ARGUMENT,
@@ -1293,7 +1290,7 @@ static int SCHInfoTestValidIPV4Address09(void)
     }
 
     struct sockaddr_in servaddr;
-    bzero(&servaddr, sizeof(servaddr));
+    memset(&servaddr, 0, sizeof(servaddr));
     if (inet_pton(AF_INET, "192.168.0.0", &servaddr.sin_addr) <= 0) {
         goto end;
     }
@@ -1305,7 +1302,7 @@ static int SCHInfoTestValidIPV4Address09(void)
         goto end;
     }
 
-    bzero(&servaddr, sizeof(servaddr));
+    memset(&servaddr, 0, sizeof(servaddr));
     if (inet_pton(AF_INET, "192.168.0.0", &servaddr.sin_addr) <= 0) {
         goto end;
     }
@@ -1329,7 +1326,7 @@ static int SCHInfoTestValidIPV4Address09(void)
     }
 
     /* Remove the 192.168.1.0/20 -> macos entry. */
-    bzero(&servaddr, sizeof(servaddr));
+    memset(&servaddr, 0, sizeof(servaddr));
     if (inet_pton(AF_INET, "192.168.0.0", &servaddr.sin_addr) <= 0) {
         goto end;
     }
@@ -1341,7 +1338,7 @@ static int SCHInfoTestValidIPV4Address09(void)
     }
 
     /* Remove the 192.168.1.0/16 -> solaris entry. */
-    bzero(&servaddr, sizeof(servaddr));
+    memset(&servaddr, 0, sizeof(servaddr));
     if (inet_pton(AF_INET, "192.168.0.0", &servaddr.sin_addr) <= 0) {
         goto end;
     }

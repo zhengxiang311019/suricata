@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -32,6 +32,7 @@
 #include "detect-xbits.h"
 #include "detect-hostbits.h"
 #include "util-spm.h"
+#include "util-byte.h"
 
 #include "detect-engine-sigorder.h"
 
@@ -53,28 +54,31 @@
     xbits:set,bitname,track ip_pair,expire 60
  */
 
-#define PARSE_REGEX     "([a-z]+)" "(?:,\\s*([^,]+))?" "(?:,\\s*(?:track\\s+([^,]+)))" "(?:,\\s*(?:expire\\s+([^,]+)))?"
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+#define PARSE_REGEX     "^([a-z]+)" "(?:,\\s*([^,]+))?" "(?:,\\s*(?:track\\s+([^,]+)))" "(?:,\\s*(?:expire\\s+([^,]+)))?"
+static DetectParseRegex parse_regex;
 
-static int DetectXbitMatch (ThreadVars *, DetectEngineThreadCtx *, Packet *, const Signature *, const SigMatchCtx *);
+static int DetectXbitMatch (DetectEngineThreadCtx *, Packet *, const Signature *, const SigMatchCtx *);
 static int DetectXbitSetup (DetectEngineCtx *, Signature *, const char *);
-void DetectXbitFree (void *);
-void XBitsRegisterTests(void);
+#ifdef UNITTESTS
+static void XBitsRegisterTests(void);
+#endif
+static void DetectXbitFree (DetectEngineCtx *, void *);
 
 void DetectXbitsRegister (void)
 {
     sigmatch_table[DETECT_XBITS].name = "xbits";
     sigmatch_table[DETECT_XBITS].desc = "operate on bits";
-    sigmatch_table[DETECT_XBITS].url = DOC_URL DOC_VERSION "/rules/xbits.html";
+    sigmatch_table[DETECT_XBITS].url = "/rules/xbits.html";
     sigmatch_table[DETECT_XBITS].Match = DetectXbitMatch;
     sigmatch_table[DETECT_XBITS].Setup = DetectXbitSetup;
     sigmatch_table[DETECT_XBITS].Free  = DetectXbitFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_XBITS].RegisterTests = XBitsRegisterTests;
+#endif
     /* this is compatible to ip-only signatures */
     sigmatch_table[DETECT_XBITS].flags |= SIGMATCH_IPONLY_COMPAT;
 
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 static int DetectIPPairbitMatchToggle (Packet *p, const DetectXbitsData *fd)
@@ -161,7 +165,7 @@ static int DetectXbitMatchIPPair(Packet *p, const DetectXbitsData *xd)
  *        -1: error
  */
 
-static int DetectXbitMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx, Packet *p, const Signature *s, const SigMatchCtx *ctx)
+static int DetectXbitMatch (DetectEngineThreadCtx *det_ctx, Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectXbitsData *fd = (const DetectXbitsData *)ctx;
     if (fd == NULL)
@@ -192,15 +196,14 @@ static int DetectXbitParse(DetectEngineCtx *de_ctx,
     DetectXbitsData *cd = NULL;
     uint8_t fb_cmd = 0;
     uint8_t hb_dir = 0;
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
     char fb_cmd_str[16] = "", fb_name[256] = "";
     char hb_dir_str[16] = "";
     enum VarTypes var_type = VAR_TYPE_NOT_SET;
-    int expire = DETECT_XBITS_EXPIRE_DEFAULT;
+    uint32_t expire = DETECT_XBITS_EXPIRE_DEFAULT;
 
-    ret = pcre_exec(parse_regex, parse_regex_study, rawstr, strlen(rawstr), 0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, rawstr,  0, 0, ov, MAX_SUBSTRINGS);
     if (ret != 2 && ret != 3 && ret != 4 && ret != 5) {
         SCLogError(SC_ERR_PCRE_MATCH, "\"%s\" is not a valid setting for xbits.", rawstr);
         return -1;
@@ -249,10 +252,9 @@ static int DetectXbitParse(DetectEngineCtx *de_ctx,
                     return -1;
                 }
                 SCLogDebug("expire_str %s", expire_str);
-                expire = atoi(expire_str);
-                if (expire < 0) {
-                    SCLogError(SC_ERR_INVALID_VALUE, "expire must be positive. "
-                            "Got %d (\"%s\")", expire, expire_str);
+                if (StringParseUint32(&expire, 10, 0, (const char *)expire_str) < 0) {
+                    SCLogError(SC_ERR_INVALID_VALUE, "Invalid value for "
+                               "expire: \"%s\"", expire_str);
                     return -1;
                 }
                 if (expire == 0) {
@@ -365,7 +367,7 @@ error:
     return -1;
 }
 
-void DetectXbitFree (void *ptr)
+static void DetectXbitFree (DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectXbitsData *fd = (DetectXbitsData *)ptr;
 
@@ -423,7 +425,7 @@ static int XBitsTestParse01(void)
     FAIL_IF_NOT(cd->tracker == (trk));                      \
     FAIL_IF_NOT(cd->type == (typ));                         \
     FAIL_IF_NOT(cd->expire == (exp));                       \
-    DetectXbitFree(cd);                                     \
+    DetectXbitFree(NULL, cd);                               \
     cd = NULL;
 
     GOOD_INPUT("set,abc,track ip_pair",
@@ -528,20 +530,21 @@ static int XBitsTestSig02(void)
             "alert ip any any -> any any (xbits:toggle,abc,track ip_dst; content:\"GET \"; sid:5;)");
     FAIL_IF_NULL(s);
 
+    s = DetectEngineAppendSig(de_ctx,
+            "alert ip any any -> any any (xbits:!set,abc,track ip_dst; content:\"GET \"; sid:6;)");
+    FAIL_IF_NOT_NULL(s);
+
     DetectEngineCtxFree(de_ctx);
     PASS;
 }
 
-#endif /* UNITTESTS */
-
 /**
  * \brief this function registers unit tests for XBits
  */
-void XBitsRegisterTests(void)
+static void XBitsRegisterTests(void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("XBitsTestParse01", XBitsTestParse01);
     UtRegisterTest("XBitsTestSig01", XBitsTestSig01);
     UtRegisterTest("XBitsTestSig02", XBitsTestSig02);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

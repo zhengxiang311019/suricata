@@ -30,7 +30,7 @@
 /* include pattern matchers */
 #include "util-mpm-ac.h"
 #include "util-mpm-ac-bs.h"
-#include "util-mpm-ac-tile.h"
+#include "util-mpm-ac-ks.h"
 #include "util-mpm-hs.h"
 #include "util-hashlist.h"
 
@@ -45,54 +45,54 @@
 #include "hs.h"
 #endif
 
+MpmTableElmt mpm_table[MPM_TABLE_SIZE];
+int mpm_default_matcher;
+
 /**
  * \brief Register a new Mpm Context.
  *
  * \param name A new profile to be registered to store this MpmCtx.
+ * \param sm_list sm_list for this name (might be variable with xforms)
  *
  * \retval id Return the id created for the new MpmCtx profile.
  */
-int32_t MpmFactoryRegisterMpmCtxProfile(DetectEngineCtx *de_ctx, const char *name)
+int32_t MpmFactoryRegisterMpmCtxProfile(
+        DetectEngineCtx *de_ctx, const char *name, const int sm_list)
 {
     void *ptmp;
     /* the very first entry */
     if (de_ctx->mpm_ctx_factory_container == NULL) {
         de_ctx->mpm_ctx_factory_container = SCMalloc(sizeof(MpmCtxFactoryContainer));
         if (de_ctx->mpm_ctx_factory_container == NULL) {
-            SCLogError(SC_ERR_MEM_ALLOC, "Error allocating memory");
-            exit(EXIT_FAILURE);
+            FatalError(SC_ERR_FATAL, "Error allocating memory");
         }
         memset(de_ctx->mpm_ctx_factory_container, 0, sizeof(MpmCtxFactoryContainer));
+        de_ctx->mpm_ctx_factory_container->max_id = ENGINE_SGH_MPM_FACTORY_CONTEXT_START_ID_RANGE;
 
         MpmCtxFactoryItem *item = SCMalloc(sizeof(MpmCtxFactoryItem));
         if (unlikely(item == NULL)) {
-            SCLogError(SC_ERR_MEM_ALLOC, "Error allocating memory");
-            exit(EXIT_FAILURE);
+            FatalError(SC_ERR_FATAL, "Error allocating memory");
         }
 
         item[0].name = name;
+        item[0].sm_list = sm_list;
 
         /* toserver */
         item[0].mpm_ctx_ts = SCMalloc(sizeof(MpmCtx));
         if (item[0].mpm_ctx_ts == NULL) {
-            SCLogError(SC_ERR_MEM_ALLOC, "Error allocating memory");
-            exit(EXIT_FAILURE);
+            FatalError(SC_ERR_FATAL, "Error allocating memory");
         }
         memset(item[0].mpm_ctx_ts, 0, sizeof(MpmCtx));
-        item[0].mpm_ctx_ts->global = 1;
+        item[0].mpm_ctx_ts->flags |= MPMCTX_FLAGS_GLOBAL;
 
         /* toclient */
         item[0].mpm_ctx_tc = SCMalloc(sizeof(MpmCtx));
         if (item[0].mpm_ctx_tc == NULL) {
-            SCLogError(SC_ERR_MEM_ALLOC, "Error allocating memory");
-            exit(EXIT_FAILURE);
+            FatalError(SC_ERR_FATAL, "Error allocating memory");
         }
         memset(item[0].mpm_ctx_tc, 0, sizeof(MpmCtx));
-        item[0].mpm_ctx_tc->global = 1;
-
-        /* our id starts from 0 always.  Helps us with the ctx retrieval from
-         * the array */
-        item[0].id = 0;
+        item[0].mpm_ctx_tc->flags |= MPMCTX_FLAGS_GLOBAL;
+        item[0].id = de_ctx->mpm_ctx_factory_container->max_id++;
 
         /* store the newly created item */
         de_ctx->mpm_ctx_factory_container->items = item;
@@ -104,25 +104,24 @@ int32_t MpmFactoryRegisterMpmCtxProfile(DetectEngineCtx *de_ctx, const char *nam
         int i;
         MpmCtxFactoryItem *items = de_ctx->mpm_ctx_factory_container->items;
         for (i = 0; i < de_ctx->mpm_ctx_factory_container->no_of_items; i++) {
-            if (items[i].name != NULL && strcmp(items[i].name, name) == 0) {
+            if (items[i].sm_list == sm_list && items[i].name != NULL &&
+                    strcmp(items[i].name, name) == 0) {
                 /* looks like we have this mpm_ctx freed */
                 if (items[i].mpm_ctx_ts == NULL) {
                     items[i].mpm_ctx_ts = SCMalloc(sizeof(MpmCtx));
                     if (items[i].mpm_ctx_ts == NULL) {
-                        SCLogError(SC_ERR_MEM_ALLOC, "Error allocating memory");
-                        exit(EXIT_FAILURE);
+                        FatalError(SC_ERR_FATAL, "Error allocating memory");
                     }
                     memset(items[i].mpm_ctx_ts, 0, sizeof(MpmCtx));
-                    items[i].mpm_ctx_ts->global = 1;
+                    items[i].mpm_ctx_ts->flags |= MPMCTX_FLAGS_GLOBAL;
                 }
                 if (items[i].mpm_ctx_tc == NULL) {
                     items[i].mpm_ctx_tc = SCMalloc(sizeof(MpmCtx));
                     if (items[i].mpm_ctx_tc == NULL) {
-                        SCLogError(SC_ERR_MEM_ALLOC, "Error allocating memory");
-                        exit(EXIT_FAILURE);
+                        FatalError(SC_ERR_FATAL, "Error allocating memory");
                     }
                     memset(items[i].mpm_ctx_tc, 0, sizeof(MpmCtx));
-                    items[i].mpm_ctx_tc->global = 1;
+                    items[i].mpm_ctx_tc->flags |= MPMCTX_FLAGS_GLOBAL;
                 }
                 return items[i].id;
             }
@@ -134,8 +133,7 @@ int32_t MpmFactoryRegisterMpmCtxProfile(DetectEngineCtx *de_ctx, const char *nam
         if (unlikely(ptmp == NULL)) {
             SCFree(items);
             items = NULL;
-            SCLogError(SC_ERR_MEM_ALLOC, "Error allocating memory");
-            exit(EXIT_FAILURE);
+            FatalError(SC_ERR_FATAL, "Error allocating memory");
         }
         items = ptmp;
 
@@ -143,26 +141,25 @@ int32_t MpmFactoryRegisterMpmCtxProfile(DetectEngineCtx *de_ctx, const char *nam
 
         MpmCtxFactoryItem *new_item = &items[de_ctx->mpm_ctx_factory_container->no_of_items];
         new_item[0].name = name;
+        new_item[0].sm_list = sm_list;
 
         /* toserver */
         new_item[0].mpm_ctx_ts = SCMalloc(sizeof(MpmCtx));
         if (new_item[0].mpm_ctx_ts == NULL) {
-            SCLogError(SC_ERR_MEM_ALLOC, "Error allocating memory");
-            exit(EXIT_FAILURE);
+            FatalError(SC_ERR_FATAL, "Error allocating memory");
         }
         memset(new_item[0].mpm_ctx_ts, 0, sizeof(MpmCtx));
-        new_item[0].mpm_ctx_ts->global = 1;
+        new_item[0].mpm_ctx_ts->flags |= MPMCTX_FLAGS_GLOBAL;
 
         /* toclient */
         new_item[0].mpm_ctx_tc = SCMalloc(sizeof(MpmCtx));
         if (new_item[0].mpm_ctx_tc == NULL) {
-            SCLogError(SC_ERR_MEM_ALLOC, "Error allocating memory");
-            exit(EXIT_FAILURE);
+            FatalError(SC_ERR_FATAL, "Error allocating memory");
         }
         memset(new_item[0].mpm_ctx_tc, 0, sizeof(MpmCtx));
-        new_item[0].mpm_ctx_tc->global = 1;
+        new_item[0].mpm_ctx_tc->flags |= MPMCTX_FLAGS_GLOBAL;
 
-        new_item[0].id = de_ctx->mpm_ctx_factory_container->no_of_items;
+        new_item[0].id = de_ctx->mpm_ctx_factory_container->max_id++;
         de_ctx->mpm_ctx_factory_container->no_of_items++;
 
         /* the newly created id */
@@ -194,21 +191,24 @@ MpmCtx *MpmFactoryGetMpmCtxForProfile(const DetectEngineCtx *de_ctx, int32_t id,
     if (id == MPM_CTX_FACTORY_UNIQUE_CONTEXT) {
         MpmCtx *mpm_ctx = SCMalloc(sizeof(MpmCtx));
         if (unlikely(mpm_ctx == NULL)) {
-            SCLogError(SC_ERR_MEM_ALLOC, "Error allocating memory");
-            exit(EXIT_FAILURE);
+            FatalError(SC_ERR_FATAL, "Error allocating memory");
         }
         memset(mpm_ctx, 0, sizeof(MpmCtx));
         return mpm_ctx;
     } else if (id < -1) {
         SCLogError(SC_ERR_INVALID_ARGUMENTS, "Invalid argument - %d\n", id);
         return NULL;
-    } else if (id >= de_ctx->mpm_ctx_factory_container->no_of_items) {
+    } else if (id >= de_ctx->mpm_ctx_factory_container->max_id) {
         /* this id does not exist */
         return NULL;
     } else {
-        return (direction == 0) ?
-            de_ctx->mpm_ctx_factory_container->items[id].mpm_ctx_ts :
-            de_ctx->mpm_ctx_factory_container->items[id].mpm_ctx_tc;
+        for (int i = 0; i < de_ctx->mpm_ctx_factory_container->no_of_items; i++) {
+            if (id == de_ctx->mpm_ctx_factory_container->items[i].id) {
+                return (direction == 0) ? de_ctx->mpm_ctx_factory_container->items[i].mpm_ctx_ts
+                                        : de_ctx->mpm_ctx_factory_container->items[i].mpm_ctx_tc;
+            }
+        }
+        return NULL;
     }
 }
 
@@ -267,18 +267,10 @@ void MpmInitCtx (MpmCtx *mpm_ctx, uint16_t matcher)
 /* MPM matcher to use by default, i.e. when "mpm-algo" is set to "auto".
  * If Hyperscan is available, use it. Otherwise, use AC. */
 #ifdef BUILD_HYPERSCAN
-# define DEFAULT_MPM     MPM_HS
-# ifdef __tile__
-#  define DEFAULT_MPM_AC MPM_AC_TILE
-# else
-#  define DEFAULT_MPM_AC MPM_AC
-# endif
+# define DEFAULT_MPM    MPM_HS
+# define DEFAULT_MPM_AC MPM_AC
 #else
-# ifdef __tile__
-#  define DEFAULT_MPM    MPM_AC_TILE
-# else
-#  define DEFAULT_MPM    MPM_AC
-# endif
+# define DEFAULT_MPM    MPM_AC
 #endif
 
 void MpmTableSetup(void)
@@ -563,6 +555,17 @@ int MpmAddPattern(MpmCtx *mpm_ctx, uint8_t *pat, uint16_t patlen,
             goto error;
 
         mpm_ctx->pattern_cnt++;
+
+        if (!(mpm_ctx->flags & MPMCTX_FLAGS_NODEPTH)) {
+            if (depth) {
+                mpm_ctx->maxdepth = MAX(mpm_ctx->maxdepth, depth);
+                SCLogDebug("%p: depth %u max %u", mpm_ctx, depth, mpm_ctx->maxdepth);
+            } else {
+                mpm_ctx->flags |= MPMCTX_FLAGS_NODEPTH;
+                mpm_ctx->maxdepth = 0;
+                SCLogDebug("%p: alas, no depth for us", mpm_ctx);
+            }
+        }
 
         if (mpm_ctx->maxlen < patlen)
             mpm_ctx->maxlen = patlen;

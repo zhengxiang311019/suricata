@@ -22,7 +22,6 @@
  */
 
 #include "suricata-common.h"
-#include "config.h"
 #include "suricata.h"
 #include "util-byte.h"
 #include "util-debug.h"
@@ -209,12 +208,39 @@ int ParseSizeStringU64(const char *size, uint64_t *res)
     if (r < 0)
         return r;
 
-    if (temp_res > UINT64_MAX)
+    if (temp_res > (double) UINT64_MAX)
         return -1;
 
     *res = temp_res;
 
     return 0;
+}
+
+void ShortenString(const char *input,
+    char *output, size_t output_size, char c)
+{
+    const size_t str_len = strlen(input);
+    size_t half = (output_size - 1) / 2;
+
+    /* If the output size is an even number */
+    if (half * 2 == (output_size - 1)) {
+        half = half - 1;
+    }
+
+    size_t spaces = (output_size - 1) - (half * 2);
+
+    /* Add the first half to the new string */
+    snprintf(output, half+1, "%s", input);
+
+    /* Add the amount of spaces wanted */
+    size_t length = half;
+    for (size_t i = half; i < half + spaces; i++) {
+        char s[2] = "";
+        snprintf(s, sizeof(s), "%c", c);
+        length = strlcat(output, s, output_size);
+    }
+
+    snprintf(output + length, half + 1, "%s", input + (str_len - half));
 }
 
 /*********************************Unittests********************************/

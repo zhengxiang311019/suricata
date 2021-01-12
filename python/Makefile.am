@@ -4,13 +4,14 @@ EXTRA_DIST =	setup.py \
 		suricatasc
 
 if HAVE_PYTHON
+if HAVE_PYTHON_DISTUTILS
 all-local:
 	cd $(srcdir) && \
-		$(HAVE_PYTHON) setup.py build --build-base $(abs_builddir)
+		$(HAVE_PYTHON) setup.py build --build-base "$(abs_builddir)"
 
 install-exec-local:
 	cd $(srcdir) && \
-		$(HAVE_PYTHON) setup.py build --build-base $(abs_builddir) \
+		$(HAVE_PYTHON) setup.py build --build-base "$(abs_builddir)" \
 		install --prefix $(DESTDIR)$(prefix)
 
 uninstall-local:
@@ -23,10 +24,11 @@ uninstall-local:
 clean-local:
 	cd $(srcdir) && \
 		$(HAVE_PYTHON) setup.py clean \
-		--build-base $(abs_builddir)
+		--build-base "$(abs_builddir)"
 	rm -rf scripts-* lib* build
 	find . -name \*.pyc -print0 | xargs -0 rm -f
 
 distclean-local:
 	rm -f version
+endif
 endif

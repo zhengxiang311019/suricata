@@ -80,6 +80,7 @@ static inline Packet *FlowForceReassemblyPseudoPacketSetup(Packet *p,
                                                            Flow *f,
                                                            TcpSession *ssn)
 {
+    const int orig_dir = direction;
     p->tenant_id = f->tenant_id;
     p->datalink = DLT_RAW;
     p->proto = IPPROTO_TCP;
@@ -88,6 +89,10 @@ static inline Packet *FlowForceReassemblyPseudoPacketSetup(Packet *p,
     p->flags |= PKT_STREAM_EOF;
     p->flags |= PKT_HAS_FLOW;
     p->flags |= PKT_PSEUDO_STREAM_END;
+    p->vlan_id[0] = f->vlan_id[0];
+    p->vlan_id[1] = f->vlan_id[1];
+    p->vlan_idx = f->vlan_idx;
+    p->livedev = (struct LiveDevice_ *)f->livedev;
 
     if (f->flags & FLOW_NOPACKET_INSPECTION) {
         DecodeSetNoPacketInspectionFlag(p);
@@ -103,6 +108,9 @@ static inline Packet *FlowForceReassemblyPseudoPacketSetup(Packet *p,
     p->flowflags |= FLOW_PKT_ESTABLISHED;
     p->payload = NULL;
     p->payload_len = 0;
+
+    /* apply reversed flow logic after setting direction to the packet */
+    direction ^= ((f->flags & FLOW_DIR_REVERSED) != 0);
 
     if (FLOW_IS_IPV4(f)) {
         if (direction == 0) {
@@ -210,7 +218,7 @@ static inline Packet *FlowForceReassemblyPseudoPacketSetup(Packet *p,
     p->tcph->th_urp = 0;
 
     /* to server */
-    if (direction == 0) {
+    if (orig_dir == 0) {
         p->tcph->th_sport = htons(f->sp);
         p->tcph->th_dport = htons(f->dp);
 
@@ -241,7 +249,15 @@ static inline Packet *FlowForceReassemblyPseudoPacketSetup(Packet *p,
     memset(&p->ts, 0, sizeof(struct timeval));
     TimeGet(&p->ts);
 
-    AppLayerParserSetEOF(f->alparser);
+    if (direction == 0) {
+        if (f->alparser && !STREAM_HAS_SEEN_DATA(&ssn->client)) {
+            AppLayerParserStateSetFlag(f->alparser, APP_LAYER_PARSER_EOF_TS);
+        }
+    } else {
+        if (f->alparser && !STREAM_HAS_SEEN_DATA(&ssn->server)) {
+            AppLayerParserStateSetFlag(f->alparser, APP_LAYER_PARSER_EOF_TC);
+        }
+    }
 
     return p;
 
@@ -250,7 +266,10 @@ error:
     return NULL;
 }
 
-static inline Packet *FlowForceReassemblyPseudoPacketGet(int direction,
+Packet *FlowForceReassemblyPseudoPacketGet(int direction,
+                                                         Flow *f,
+                                                         TcpSession *ssn);
+Packet *FlowForceReassemblyPseudoPacketGet(int direction,
                                                          Flow *f,
                                                          TcpSession *ssn)
 {
@@ -269,53 +288,51 @@ static inline Packet *FlowForceReassemblyPseudoPacketGet(int direction,
  *  \brief Check if a flow needs forced reassembly, or any other processing
  *
  *  \param f *LOCKED* flow
- *  \param server ptr to int that should be set to 1 or 2 if we return 1
- *  \param client ptr to int that should be set to 1 or 2 if we return 1
  *
  *  \retval 0 no
  *  \retval 1 yes
  */
-int FlowForceReassemblyNeedReassembly(Flow *f, int *server, int *client)
+int FlowForceReassemblyNeedReassembly(Flow *f)
 {
+
     if (f == NULL || f->protoctx == NULL) {
-        *server = *client = STREAM_HAS_UNPROCESSED_SEGMENTS_NONE;
         SCReturnInt(0);
     }
 
     TcpSession *ssn = (TcpSession *)f->protoctx;
-    *client = StreamNeedsReassembly(ssn, STREAM_TOSERVER);
-    *server = StreamNeedsReassembly(ssn, STREAM_TOCLIENT);
+    int client = StreamNeedsReassembly(ssn, STREAM_TOSERVER);
+    int server = StreamNeedsReassembly(ssn, STREAM_TOCLIENT);
 
     /* if state is not fully closed we assume that we haven't fully
      * inspected the app layer state yet */
     if (ssn->state >= TCP_ESTABLISHED && ssn->state != TCP_CLOSED)
     {
-        *client = STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION;
-        *server = STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION;
+        client = STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION;
+        server = STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION;
     }
 
     /* if app layer still needs some love, push through */
-    if (f->alproto != ALPROTO_UNKNOWN && f->alstate != NULL &&
-        AppLayerParserProtocolSupportsTxs(f->proto, f->alproto))
-    {
+    if (f->alproto != ALPROTO_UNKNOWN && f->alstate != NULL) {
         const uint64_t total_txs = AppLayerParserGetTxCnt(f, f->alstate);
 
         if (AppLayerParserGetTransactionActive(f, f->alparser, STREAM_TOCLIENT) < total_txs)
         {
-            *server = STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION;
+            server = STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION;
         }
         if (AppLayerParserGetTransactionActive(f, f->alparser, STREAM_TOSERVER) < total_txs)
         {
-            *client = STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION;
+            client = STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION;
         }
     }
 
     /* nothing to do */
-    if (*client == STREAM_HAS_UNPROCESSED_SEGMENTS_NONE &&
-        *server == STREAM_HAS_UNPROCESSED_SEGMENTS_NONE) {
+    if (client == STREAM_HAS_UNPROCESSED_SEGMENTS_NONE &&
+        server == STREAM_HAS_UNPROCESSED_SEGMENTS_NONE) {
         SCReturnInt(0);
     }
 
+    f->ffr_ts = client;
+    f->ffr_tc = server;
     SCReturnInt(1);
 }
 
@@ -326,78 +343,13 @@ int FlowForceReassemblyNeedReassembly(Flow *f, int *server, int *client)
  *        The function requires flow to be locked beforehand.
  *
  * \param f Pointer to the flow.
- * \param server action required for server: 1 or 2
- * \param client action required for client: 1 or 2
  *
  * \retval 0 This flow doesn't need any reassembly processing; 1 otherwise.
  */
-int FlowForceReassemblyForFlow(Flow *f, int server, int client)
+void FlowForceReassemblyForFlow(Flow *f)
 {
-    Packet *p1 = NULL, *p2 = NULL;
-
-    /* looks like we have no flows in this queue */
-    if (f == NULL || f->protoctx == NULL) {
-        return 0;
-    }
-
-    /* Get the tcp session for the flow */
-    TcpSession *ssn = (TcpSession *)f->protoctx;
-
-    /* The packets we use are based on what segments in what direction are
-     * unprocessed.
-     * p1 if we have client segments for reassembly purpose only.  If we
-     * have no server segments p2 can be a toserver packet with dummy
-     * seq/ack, and if we have server segments p2 has to carry out reassembly
-     * for server segment as well, in which case we will also need a p3 in the
-     * toclient which is now dummy since all we need it for is detection */
-
-    /* insert a pseudo packet in the toserver direction */
-    if (client == STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION) {
-        p1 = FlowForceReassemblyPseudoPacketGet(0, f, ssn);
-        if (p1 == NULL) {
-            goto done;
-        }
-        PKT_SET_SRC(p1, PKT_SRC_FFR);
-
-        if (server == STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION) {
-            p2 = FlowForceReassemblyPseudoPacketGet(1, f, ssn);
-            if (p2 == NULL) {
-                FlowDeReference(&p1->flow);
-                TmqhOutputPacketpool(NULL, p1);
-                goto done;
-            }
-            PKT_SET_SRC(p2, PKT_SRC_FFR);
-        }
-    } else {
-        if (server == STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION) {
-            p1 = FlowForceReassemblyPseudoPacketGet(1, f, ssn);
-            if (p1 == NULL) {
-                goto done;
-            }
-            PKT_SET_SRC(p1, PKT_SRC_FFR);
-        } else {
-            /* impossible */
-            BUG_ON(1);
-        }
-    }
-
-    /* inject the packet(s) into the appropriate thread */
-    int thread_id = (int)f->thread_id;
-    Packet *packets[3] = { p1, p2 ? p2 : NULL, NULL }; /**< null terminated array of packets */
-    if (unlikely(!(TmThreadsInjectPacketsById(packets, thread_id)))) {
-        FlowDeReference(&p1->flow);
-        TmqhOutputPacketpool(NULL, p1);
-        if (p2) {
-            FlowDeReference(&p2->flow);
-            TmqhOutputPacketpool(NULL, p2);
-        }
-    }
-
-    /* done, in case of error (no packet) we still tag flow as complete
-     * as we're probably resource stress if we couldn't get packets */
-done:
-    f->flags |= FLOW_TIMEOUT_REASSEMBLY_DONE;
-    return 1;
+    const int thread_id = (int)f->thread_id[0];
+    TmThreadsInjectFlowById(f, thread_id);
 }
 
 /**
@@ -423,11 +375,12 @@ static inline void FlowForceReassemblyForHash(void)
         PacketPoolWaitForN(9);
         FBLOCK_LOCK(fb);
 
-        /* get the topmost flow from the QUEUE */
         Flow *f = fb->head;
+        Flow *prev_f = NULL;
 
         /* we need to loop through all the flows in the queue */
         while (f != NULL) {
+            Flow *next_f = f->next;
             PacketPoolWaitForN(3);
 
             FLOWLOCK_WRLOCK(f);
@@ -437,20 +390,26 @@ static inline void FlowForceReassemblyForHash(void)
             /* \todo Also skip flows that shouldn't be inspected */
             if (ssn == NULL) {
                 FLOWLOCK_UNLOCK(f);
-                f = f->hnext;
+                prev_f = f;
+                f = next_f;
                 continue;
             }
 
-            int client_ok = 0;
-            int server_ok = 0;
-            if (FlowForceReassemblyNeedReassembly(f, &server_ok, &client_ok) == 1) {
-                FlowForceReassemblyForFlow(f, server_ok, client_ok);
+            /* in case of additional work, we pull the flow out of the
+             * hash and xfer ownership to the injected packet(s) */
+            if (FlowForceReassemblyNeedReassembly(f) == 1) {
+                RemoveFromHash(f, prev_f);
+                f->flow_end_flags |= FLOW_END_FLAG_SHUTDOWN;
+                FlowForceReassemblyForFlow(f);
+                f = next_f;
+                continue;
             }
 
             FLOWLOCK_UNLOCK(f);
 
             /* next flow in the queue */
-            f = f->hnext;
+            prev_f = f;
+            f = f->next;
         }
         FBLOCK_UNLOCK(fb);
     }
@@ -466,4 +425,3 @@ void FlowForceReassembly(void)
     FlowForceReassemblyForHash();
     return;
 }
-

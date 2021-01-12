@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2014 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -51,6 +51,7 @@
 #include "app-layer-parser.h"
 #include "app-layer-ssh.h"
 #include "detect-ssh-proto-version.h"
+#include "rust.h"
 
 #include "stream-tcp.h"
 
@@ -59,15 +60,16 @@
  */
 #define PARSE_REGEX  "^\\s*\"?\\s*([0-9]+([\\.\\-0-9]+)?|2_compat)\\s*\"?\\s*$"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
-static int DetectSshVersionMatch (ThreadVars *, DetectEngineThreadCtx *,
+static int DetectSshVersionMatch (DetectEngineThreadCtx *,
         Flow *, uint8_t, void *, void *,
         const Signature *, const SigMatchCtx *);
 static int DetectSshVersionSetup (DetectEngineCtx *, Signature *, const char *);
+#ifdef UNITTESTS
 static void DetectSshVersionRegisterTests(void);
-static void DetectSshVersionFree(void *);
+#endif
+static void DetectSshVersionFree(DetectEngineCtx *, void *);
 static int g_ssh_banner_list_id = 0;
 
 /**
@@ -77,14 +79,17 @@ void DetectSshVersionRegister(void)
 {
     sigmatch_table[DETECT_AL_SSH_PROTOVERSION].name = "ssh.protoversion";
     sigmatch_table[DETECT_AL_SSH_PROTOVERSION].desc = "match SSH protocol version";
-    sigmatch_table[DETECT_AL_SSH_PROTOVERSION].url = DOC_URL DOC_VERSION "/rules/ssh-keywords.html#ssh-protoversion";
+    sigmatch_table[DETECT_AL_SSH_PROTOVERSION].url = "/rules/ssh-keywords.html#ssh-protoversion";
     sigmatch_table[DETECT_AL_SSH_PROTOVERSION].AppLayerTxMatch = DetectSshVersionMatch;
     sigmatch_table[DETECT_AL_SSH_PROTOVERSION].Setup = DetectSshVersionSetup;
     sigmatch_table[DETECT_AL_SSH_PROTOVERSION].Free  = DetectSshVersionFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_AL_SSH_PROTOVERSION].RegisterTests = DetectSshVersionRegisterTests;
-    sigmatch_table[DETECT_AL_SSH_PROTOVERSION].flags = SIGMATCH_QUOTES_OPTIONAL;
+#endif
+    sigmatch_table[DETECT_AL_SSH_PROTOVERSION].flags = SIGMATCH_QUOTES_OPTIONAL|SIGMATCH_INFO_DEPRECATED;
+    sigmatch_table[DETECT_AL_SSH_PROTOVERSION].alternative = DETECT_AL_SSH_PROTOCOL;
 
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 
     g_ssh_banner_list_id = DetectBufferTypeRegister("ssh_banner");
 }
@@ -100,7 +105,7 @@ void DetectSshVersionRegister(void)
  * \retval 0 no match
  * \retval 1 match
  */
-static int DetectSshVersionMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectSshVersionMatch (DetectEngineThreadCtx *det_ctx,
         Flow *f, uint8_t flags, void *state, void *txv,
         const Signature *s, const SigMatchCtx *m)
 {
@@ -109,34 +114,35 @@ static int DetectSshVersionMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx,
     SCLogDebug("lets see");
 
     DetectSshVersionData *ssh = (DetectSshVersionData *)m;
-    SshState *ssh_state = (SshState *)state;
-    if (ssh_state == NULL) {
+    if (state == NULL) {
         SCLogDebug("no ssh state, no match");
         SCReturnInt(0);
     }
 
     int ret = 0;
-    if ((flags & STREAM_TOCLIENT) && (ssh_state->srv_hdr.flags & SSH_FLAG_VERSION_PARSED)) {
-        if (ssh->flags & SSH_FLAG_PROTOVERSION_2_COMPAT) {
-            SCLogDebug("looking for ssh server protoversion 2 compat");
-            if (strncmp((char *) ssh_state->srv_hdr.proto_version, "2", 1) == 0 ||
-                strncmp((char *) ssh_state->srv_hdr.proto_version, "2.", 2) == 0 ||
-                strncmp((char *) ssh_state->srv_hdr.proto_version, "1.99", 4) == 0)
+    const uint8_t *protocol = NULL;
+    uint32_t b_len = 0;
+
+    if (rs_ssh_tx_get_protocol(txv, &protocol, &b_len, flags) != 1)
+        SCReturnInt(0);
+    if (protocol == NULL || b_len == 0)
+        SCReturnInt(0);
+
+    if (ssh->flags & SSH_FLAG_PROTOVERSION_2_COMPAT) {
+        SCLogDebug("looking for ssh protoversion 2 compat");
+        if (protocol[0] == '2') {
+            ret = 1;
+        } else if (b_len >= 4) {
+            if (memcmp(protocol, "1.99", 4) == 0)    {
                 ret = 1;
-        } else {
-            SCLogDebug("looking for ssh server protoversion %s length %"PRIu16"", ssh->ver, ssh->len);
-            ret = (strncmp((char *) ssh_state->srv_hdr.proto_version, (char *) ssh->ver, ssh->len) == 0)? 1 : 0;
+            }
         }
-    } else if ((flags & STREAM_TOSERVER) && (ssh_state->cli_hdr.flags & SSH_FLAG_VERSION_PARSED)) {
-        if (ssh->flags & SSH_FLAG_PROTOVERSION_2_COMPAT) {
-            SCLogDebug("looking for client ssh client protoversion 2 compat");
-            if (strncmp((char *) ssh_state->cli_hdr.proto_version, "2", 1) == 0 ||
-                strncmp((char *) ssh_state->cli_hdr.proto_version, "2.", 2) == 0 ||
-                strncmp((char *) ssh_state->cli_hdr.proto_version, "1.99", 4) == 0)
+    } else {
+        SCLogDebug("looking for ssh protoversion %s length %"PRIu16"", ssh->ver, ssh->len);
+        if (b_len == ssh->len) {
+            if (memcmp(protocol, ssh->ver, ssh->len) == 0) {
                 ret = 1;
-        } else {
-            SCLogDebug("looking for ssh client protoversion %s length %"PRIu16"", ssh->ver, ssh->len);
-            ret = (strncmp((char *) ssh_state->cli_hdr.proto_version, (char *) ssh->ver, ssh->len) == 0)? 1 : 0;
+            }
         }
     }
     SCReturnInt(ret);
@@ -145,21 +151,19 @@ static int DetectSshVersionMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx,
 /**
  * \brief This function is used to parse IPV4 ip_id passed via keyword: "id"
  *
+ * \param de_ctx Pointer to the detection engine context
  * \param idstr Pointer to the user provided id option
  *
  * \retval id_d pointer to DetectSshVersionData on success
  * \retval NULL on failure
  */
-static DetectSshVersionData *DetectSshVersionParse (const char *str)
+static DetectSshVersionData *DetectSshVersionParse (DetectEngineCtx *de_ctx, const char *str)
 {
     DetectSshVersionData *ssh = NULL;
-	#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
 
-    ret = pcre_exec(parse_regex, parse_regex_study, str, strlen(str), 0, 0,
-                    ov, MAX_SUBSTRINGS);
-
+    ret = DetectParsePcreExec(&parse_regex, str, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 1 || ret > 3) {
         SCLogError(SC_ERR_PCRE_MATCH, "invalid ssh.protoversion option");
         goto error;
@@ -175,9 +179,10 @@ static DetectSshVersionData *DetectSshVersionParse (const char *str)
 
         /* We have a correct id option */
         ssh = SCMalloc(sizeof(DetectSshVersionData));
-        if (unlikely(ssh == NULL))
+        if (unlikely(ssh == NULL)) {
+            pcre_free_substring(str_ptr);
             goto error;
-
+        }
         memset(ssh, 0x00, sizeof(DetectSshVersionData));
 
         /* If we expect a protocol version 2 or 1.99 (considered 2, we
@@ -185,14 +190,17 @@ static DetectSshVersionData *DetectSshVersionParse (const char *str)
         if (strcmp("2_compat", str_ptr) == 0) {
             ssh->flags |= SSH_FLAG_PROTOVERSION_2_COMPAT;
             SCLogDebug("will look for ssh protocol version 2 (2, 2.0, 1.99 that's considered as 2");
+            pcre_free_substring(str_ptr);
             return ssh;
         }
 
         ssh->ver = (uint8_t *)SCStrdup((char*)str_ptr);
         if (ssh->ver == NULL) {
+            pcre_free_substring(str_ptr);
             goto error;
         }
         ssh->len = strlen((char *) ssh->ver);
+        pcre_free_substring(str_ptr);
 
         SCLogDebug("will look for ssh %s", ssh->ver);
     }
@@ -201,7 +209,7 @@ static DetectSshVersionData *DetectSshVersionParse (const char *str)
 
 error:
     if (ssh != NULL)
-        DetectSshVersionFree(ssh);
+        DetectSshVersionFree(de_ctx, ssh);
     return NULL;
 
 }
@@ -225,7 +233,7 @@ static int DetectSshVersionSetup (DetectEngineCtx *de_ctx, Signature *s, const c
     if (DetectSignatureSetAppProto(s, ALPROTO_SSH) != 0)
         return -1;
 
-    ssh = DetectSshVersionParse(str);
+    ssh = DetectSshVersionParse(de_ctx, str);
     if (ssh == NULL)
         goto error;
 
@@ -243,7 +251,7 @@ static int DetectSshVersionSetup (DetectEngineCtx *de_ctx, Signature *s, const c
 
 error:
     if (ssh != NULL)
-        DetectSshVersionFree(ssh);
+        DetectSshVersionFree(de_ctx, ssh);
     if (sm != NULL)
         SCFree(sm);
     return -1;
@@ -255,10 +263,11 @@ error:
  *
  * \param id_d pointer to DetectSshVersionData
  */
-void DetectSshVersionFree(void *ptr)
+void DetectSshVersionFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    DetectSshVersionData *id_d = (DetectSshVersionData *)ptr;
-    SCFree(id_d);
+    DetectSshVersionData *sshd = (DetectSshVersionData *)ptr;
+    SCFree(sshd->ver);
+    SCFree(sshd);
 }
 
 #ifdef UNITTESTS /* UNITTESTS */
@@ -270,9 +279,9 @@ void DetectSshVersionFree(void *ptr)
 static int DetectSshVersionTestParse01 (void)
 {
     DetectSshVersionData *ssh = NULL;
-    ssh = DetectSshVersionParse("1.0");
+    ssh = DetectSshVersionParse(NULL, "1.0");
     if (ssh != NULL && strncmp((char *) ssh->ver, "1.0", 3) == 0) {
-        DetectSshVersionFree(ssh);
+        DetectSshVersionFree(NULL, ssh);
         return 1;
     }
 
@@ -286,9 +295,9 @@ static int DetectSshVersionTestParse01 (void)
 static int DetectSshVersionTestParse02 (void)
 {
     DetectSshVersionData *ssh = NULL;
-    ssh = DetectSshVersionParse("2_compat");
+    ssh = DetectSshVersionParse(NULL, "2_compat");
     if (ssh->flags & SSH_FLAG_PROTOVERSION_2_COMPAT) {
-        DetectSshVersionFree(ssh);
+        DetectSshVersionFree(NULL, ssh);
         return 1;
     }
 
@@ -302,24 +311,24 @@ static int DetectSshVersionTestParse02 (void)
 static int DetectSshVersionTestParse03 (void)
 {
     DetectSshVersionData *ssh = NULL;
-    ssh = DetectSshVersionParse("2_com");
+    ssh = DetectSshVersionParse(NULL, "2_com");
     if (ssh != NULL) {
-        DetectSshVersionFree(ssh);
+        DetectSshVersionFree(NULL, ssh);
         return 0;
     }
-    ssh = DetectSshVersionParse("");
+    ssh = DetectSshVersionParse(NULL, "");
     if (ssh != NULL) {
-        DetectSshVersionFree(ssh);
+        DetectSshVersionFree(NULL, ssh);
         return 0;
     }
-    ssh = DetectSshVersionParse(".1");
+    ssh = DetectSshVersionParse(NULL, ".1");
     if (ssh != NULL) {
-        DetectSshVersionFree(ssh);
+        DetectSshVersionFree(NULL, ssh);
         return 0;
     }
-    ssh = DetectSshVersionParse("lalala");
+    ssh = DetectSshVersionParse(NULL, "lalala");
     if (ssh != NULL) {
-        DetectSshVersionFree(ssh);
+        DetectSshVersionFree(NULL, ssh);
         return 0;
     }
 
@@ -328,46 +337,52 @@ static int DetectSshVersionTestParse03 (void)
 
 
 #include "stream-tcp-reassemble.h"
+#include "stream-tcp-util.h"
 
 /** \test Send a get request in three chunks + more data. */
 static int DetectSshVersionTestDetect01(void)
 {
-    Flow f;
-    uint8_t sshbuf1[] = "SSH-1.";
-    uint32_t sshlen1 = sizeof(sshbuf1) - 1;
-    uint8_t sshbuf2[] = "10-PuTTY_2.123" ;
-    uint32_t sshlen2 = sizeof(sshbuf2) - 1;
-    uint8_t sshbuf3[] = "\n";
-    uint32_t sshlen3 = sizeof(sshbuf3) - 1;
-    uint8_t sshbuf4[] = "whatever...";
-    uint32_t sshlen4 = sizeof(sshbuf4) - 1;
+    TcpReassemblyThreadCtx *ra_ctx = NULL;
+    ThreadVars tv;
     TcpSession ssn;
+    Flow *f = NULL;
     Packet *p = NULL;
+
+    uint8_t sshbuf1[] = "SSH-1.";
+    uint8_t sshbuf2[] = "10-PuTTY_2.123" ;
+    uint8_t sshbuf3[] = "\n";
+    uint8_t sshbuf4[] = "whatever...";
+
+    uint8_t* sshbufs[4] = {sshbuf1, sshbuf2, sshbuf3, sshbuf4};
+    uint32_t sshlens[4] = {sizeof(sshbuf1) - 1, sizeof(sshbuf2) - 1, sizeof(sshbuf3) - 1, sizeof(sshbuf4) - 1};
+
+    memset(&tv, 0x00, sizeof(tv));
+
+    StreamTcpUTInit(&ra_ctx);
+    StreamTcpUTInitInline();
+    StreamTcpUTSetupSession(&ssn);
+    StreamTcpUTSetupStream(&ssn.server, 1);
+    StreamTcpUTSetupStream(&ssn.client, 1);
+
+    f = UTHBuildFlow(AF_INET, "1.1.1.1", "2.2.2.2", 1234, 2222);
+    FAIL_IF_NULL(f);
+    f->protoctx = &ssn;
+    f->proto = IPPROTO_TCP;
+    f->alproto = ALPROTO_SSH;
+
+    p = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
+    FAIL_IF(unlikely(p == NULL));
+    p->flow = f;
+
     Signature *s = NULL;
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
 
     memset(&th_v, 0, sizeof(th_v));
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-
-    p = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
-    FAIL_IF_NULL(p);
-
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    p->flow = &f;
-    p->flowflags |= FLOW_PKT_TOSERVER;
-    p->flowflags |= FLOW_PKT_ESTABLISHED;
-    p->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-    f.alproto = ALPROTO_SSH;
-    f.proto = IPPROTO_TCP;
-
-    StreamTcpInitConfig(TRUE);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    FAIL_IF_NULL (de_ctx);
+    FAIL_IF_NULL(de_ctx);
+
     de_ctx->flags |= DE_QUIET;
 
     s = de_ctx->sig_list = SigInit(de_ctx,"alert ssh any any -> any any (msg:\"SSH\"; ssh.protoversion:1.10; sid:1;)");
@@ -376,286 +391,190 @@ static int DetectSshVersionTestDetect01(void)
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
 
-    SCLogDebug("==> 1");
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_SSH,
-                                STREAM_TOSERVER, sshbuf1, sshlen1);
-    FAIL_IF(r != 0);
+    uint32_t seq = 2;
+    for (int i=0; i<4; i++) {
+        FAIL_IF(StreamTcpUTAddSegmentWithPayload(&tv, ra_ctx, &ssn.server, seq, sshbufs[i], sshlens[i]) == -1);
+        seq += sshlens[i];
+        FAIL_IF(StreamTcpReassembleAppLayer(&tv, ra_ctx, &ssn, &ssn.server, p, UPDATE_DIR_PACKET) < 0);
+    }
 
-    SCLogDebug("==> 2");
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_SSH, STREAM_TOSERVER,
-                            sshbuf2, sshlen2);
-    FAIL_IF(r != 0);
-
-    SCLogDebug("==> 3");
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_SSH, STREAM_TOSERVER,
-                            sshbuf3, sshlen3);
-    FAIL_IF(r != 0);
-
-    SCLogDebug("==> 4");
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_SSH, STREAM_TOSERVER,
-                            sshbuf4, sshlen4);
-    FAIL_IF(r != 0);
-
-    SshState *ssh_state = f.alstate;
+    void *ssh_state = f->alstate;
     FAIL_IF_NULL(ssh_state);
 
     /* do detect */
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
 
-    FAIL_IF(!(PacketAlertCheck(p, 1)));
+    FAIL_IF(PacketAlertCheck(p, 1));
 
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-    UTHFreePackets(&p, 1);
-    AppLayerParserThreadCtxFree(alp_tctx);
-
+    UTHFreePacket(p);
+    StreamTcpUTClearSession(&ssn);
+    StreamTcpUTDeinit(ra_ctx);
+    UTHFreeFlow(f);
     PASS;
 }
 
 /** \test Send a get request in three chunks + more data. */
 static int DetectSshVersionTestDetect02(void)
 {
-    int result = 0;
-    Flow f;
-    uint8_t sshbuf1[] = "SSH-1.";
-    uint32_t sshlen1 = sizeof(sshbuf1) - 1;
-    uint8_t sshbuf2[] = "99-PuTTY_2.123" ;
-    uint32_t sshlen2 = sizeof(sshbuf2) - 1;
-    uint8_t sshbuf3[] = "\n";
-    uint32_t sshlen3 = sizeof(sshbuf3) - 1;
-    uint8_t sshbuf4[] = "whatever...";
-    uint32_t sshlen4 = sizeof(sshbuf4) - 1;
+    TcpReassemblyThreadCtx *ra_ctx = NULL;
+    ThreadVars tv;
     TcpSession ssn;
+    Flow *f = NULL;
     Packet *p = NULL;
+
+    uint8_t sshbuf1[] = "SSH-1.99-Pu";
+    uint8_t sshbuf2[] = "TTY_2.123" ;
+    uint8_t sshbuf3[] = "\n";
+    uint8_t sshbuf4[] = "whatever...";
+
+    uint8_t* sshbufs[4] = {sshbuf1, sshbuf2, sshbuf3, sshbuf4};
+    uint32_t sshlens[4] = {sizeof(sshbuf1) - 1, sizeof(sshbuf2) - 1, sizeof(sshbuf3) - 1, sizeof(sshbuf4) - 1};
+
+    memset(&tv, 0x00, sizeof(tv));
+
+    StreamTcpUTInit(&ra_ctx);
+    StreamTcpUTInitInline();
+    StreamTcpUTSetupSession(&ssn);
+    StreamTcpUTSetupStream(&ssn.server, 1);
+    StreamTcpUTSetupStream(&ssn.client, 1);
+
+    f = UTHBuildFlow(AF_INET, "1.1.1.1", "2.2.2.2", 1234, 2222);
+    FAIL_IF_NULL(f);
+    f->protoctx = &ssn;
+    f->proto = IPPROTO_TCP;
+    f->alproto = ALPROTO_SSH;
+
+    p = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
+    FAIL_IF(unlikely(p == NULL));
+    p->flow = f;
+
     Signature *s = NULL;
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
 
     memset(&th_v, 0, sizeof(th_v));
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-
-    p = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
-
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    p->flow = &f;
-    p->flowflags |= FLOW_PKT_TOSERVER;
-    p->flowflags |= FLOW_PKT_ESTABLISHED;
-    p->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-    f.alproto = ALPROTO_SSH;
-    f.proto = IPPROTO_TCP;
-
-    StreamTcpInitConfig(TRUE);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx);
 
     de_ctx->flags |= DE_QUIET;
 
     s = de_ctx->sig_list = SigInit(de_ctx,"alert ssh any any -> any any (msg:\"SSH\"; ssh.protoversion:2_compat; sid:1;)");
-    if (s == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(s);
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
 
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_SSH,
-                                STREAM_TOSERVER, sshbuf1, sshlen1);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        goto end;
+    uint32_t seq = 2;
+    for (int i=0; i<4; i++) {
+        FAIL_IF(StreamTcpUTAddSegmentWithPayload(&tv, ra_ctx, &ssn.server, seq, sshbufs[i], sshlens[i]) == -1);
+        seq += sshlens[i];
+        FAIL_IF(StreamTcpReassembleAppLayer(&tv, ra_ctx, &ssn, &ssn.server, p, UPDATE_DIR_PACKET) < 0);
     }
 
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_SSH, STREAM_TOSERVER,
-                            sshbuf2, sshlen2);
-    if (r != 0) {
-        printf("toserver chunk 2 returned %" PRId32 ", expected 0: ", r);
-        FLOWLOCK_UNLOCK(&f);
-        goto end;
-    }
-
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_SSH, STREAM_TOSERVER,
-                            sshbuf3, sshlen3);
-    if (r != 0) {
-        printf("toserver chunk 3 returned %" PRId32 ", expected 0: ", r);
-        FLOWLOCK_UNLOCK(&f);
-        goto end;
-    }
-
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_SSH, STREAM_TOSERVER,
-                            sshbuf4, sshlen4);
-    if (r != 0) {
-        printf("toserver chunk 4 returned %" PRId32 ", expected 0: ", r);
-        FLOWLOCK_UNLOCK(&f);
-        goto end;
-    }
-    FLOWLOCK_UNLOCK(&f);
-
-    SshState *ssh_state = f.alstate;
-    if (ssh_state == NULL) {
-        printf("no ssh state: ");
-        goto end;
-    }
+    void *ssh_state = f->alstate;
+    FAIL_IF_NULL(ssh_state);
 
     /* do detect */
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
 
-    if ( !(PacketAlertCheck(p, 1))) {
-        printf("Error, the sig should match: ");
-        goto end;
-    }
-
-    result = 1;
-end:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
+    FAIL_IF(PacketAlertCheck(p, 1));
 
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    UTHFreePackets(&p, 1);
-    if (alp_tctx != NULL)
-        AppLayerParserThreadCtxFree(alp_tctx);
-    return result;
+    UTHFreePacket(p);
+    StreamTcpUTClearSession(&ssn);
+    StreamTcpUTDeinit(ra_ctx);
+    UTHFreeFlow(f);
+    PASS;
 }
 
 /** \test Send a get request in three chunks + more data. */
 static int DetectSshVersionTestDetect03(void)
 {
-    int result = 0;
-    Flow f;
-    uint8_t sshbuf1[] = "SSH-1.";
-    uint32_t sshlen1 = sizeof(sshbuf1) - 1;
-    uint8_t sshbuf2[] = "7-PuTTY_2.123" ;
-    uint32_t sshlen2 = sizeof(sshbuf2) - 1;
-    uint8_t sshbuf3[] = "\n";
-    uint32_t sshlen3 = sizeof(sshbuf3) - 1;
-    uint8_t sshbuf4[] = "whatever...";
-    uint32_t sshlen4 = sizeof(sshbuf4) - 1;
+    TcpReassemblyThreadCtx *ra_ctx = NULL;
+    ThreadVars tv;
     TcpSession ssn;
+    Flow *f = NULL;
     Packet *p = NULL;
+
+    uint8_t sshbuf1[] = "SSH-1.";
+    uint8_t sshbuf2[] = "7-PuTTY_2.123" ;
+    uint8_t sshbuf3[] = "\n";
+    uint8_t sshbuf4[] = "whatever...";
+
+    uint8_t* sshbufs[4] = {sshbuf1, sshbuf2, sshbuf3, sshbuf4};
+    uint32_t sshlens[4] = {sizeof(sshbuf1) - 1, sizeof(sshbuf2) - 1, sizeof(sshbuf3) - 1, sizeof(sshbuf4) - 1};
+
+    memset(&tv, 0x00, sizeof(tv));
+
+    StreamTcpUTInit(&ra_ctx);
+    StreamTcpUTInitInline();
+    StreamTcpUTSetupSession(&ssn);
+    StreamTcpUTSetupStream(&ssn.server, 1);
+    StreamTcpUTSetupStream(&ssn.client, 1);
+
+    f = UTHBuildFlow(AF_INET, "1.1.1.1", "2.2.2.2", 1234, 2222);
+    FAIL_IF_NULL(f);
+    f->protoctx = &ssn;
+    f->proto = IPPROTO_TCP;
+    f->alproto = ALPROTO_SSH;
+
+    p = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
+    FAIL_IF(unlikely(p == NULL));
+    p->flow = f;
+
     Signature *s = NULL;
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
 
     memset(&th_v, 0, sizeof(th_v));
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-
-    p = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
-
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    p->flow = &f;
-    p->flowflags |= FLOW_PKT_TOSERVER;
-    p->flowflags |= FLOW_PKT_ESTABLISHED;
-    p->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-    f.alproto = ALPROTO_SSH;
-    f.proto = IPPROTO_TCP;
-
-    StreamTcpInitConfig(TRUE);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx);
 
     de_ctx->flags |= DE_QUIET;
 
     s = de_ctx->sig_list = SigInit(de_ctx,"alert ssh any any -> any any (msg:\"SSH\"; ssh.protoversion:2_compat; sid:1;)");
-    if (s == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(s);
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
 
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_SSH,
-                                STREAM_TOSERVER, sshbuf1, sshlen1);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        FLOWLOCK_UNLOCK(&f);
-        goto end;
+    uint32_t seq = 2;
+    for (int i=0; i<4; i++) {
+        FAIL_IF(StreamTcpUTAddSegmentWithPayload(&tv, ra_ctx, &ssn.server, seq, sshbufs[i], sshlens[i]) == -1);
+        seq += sshlens[i];
+        FAIL_IF(StreamTcpReassembleAppLayer(&tv, ra_ctx, &ssn, &ssn.server, p, UPDATE_DIR_PACKET) < 0);
     }
 
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_SSH, STREAM_TOSERVER,
-                            sshbuf2, sshlen2);
-    if (r != 0) {
-        printf("toserver chunk 2 returned %" PRId32 ", expected 0: ", r);
-        FLOWLOCK_UNLOCK(&f);
-        goto end;
-    }
-
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_SSH, STREAM_TOSERVER,
-                            sshbuf3, sshlen3);
-    if (r != 0) {
-        printf("toserver chunk 3 returned %" PRId32 ", expected 0: ", r);
-        FLOWLOCK_UNLOCK(&f);
-        goto end;
-    }
-
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_SSH, STREAM_TOSERVER,
-                            sshbuf4, sshlen4);
-    if (r != 0) {
-        printf("toserver chunk 4 returned %" PRId32 ", expected 0: ", r);
-        FLOWLOCK_UNLOCK(&f);
-        goto end;
-    }
-    FLOWLOCK_UNLOCK(&f);
-
-    SshState *ssh_state = f.alstate;
-    if (ssh_state == NULL) {
-        printf("no ssh state: ");
-        goto end;
-    }
+    void *ssh_state = f->alstate;
+    FAIL_IF_NULL(ssh_state);
 
     /* do detect */
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
 
-    if (PacketAlertCheck(p, 1)) {
-        printf("Error, 1.7 version is not 2 compat, so the sig should not match: ");
-        goto end;
-    }
-
-    result = 1;
-end:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
+    FAIL_IF(PacketAlertCheck(p, 1));
 
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    UTHFreePackets(&p, 1);
-    if (alp_tctx != NULL)
-        AppLayerParserThreadCtxFree(alp_tctx);
-    return result;
+    UTHFreePacket(p);
+    StreamTcpUTClearSession(&ssn);
+    StreamTcpUTDeinit(ra_ctx);
+    UTHFreeFlow(f);
+    PASS;
 }
-
-#endif /* UNITTESTS */
 
 /**
  * \brief this function registers unit tests for DetectSshVersion
  */
-void DetectSshVersionRegisterTests(void)
+static void DetectSshVersionRegisterTests(void)
 {
-#ifdef UNITTESTS /* UNITTESTS */
     UtRegisterTest("DetectSshVersionTestParse01", DetectSshVersionTestParse01);
     UtRegisterTest("DetectSshVersionTestParse02", DetectSshVersionTestParse02);
     UtRegisterTest("DetectSshVersionTestParse03", DetectSshVersionTestParse03);
@@ -665,6 +584,5 @@ void DetectSshVersionRegisterTests(void)
                    DetectSshVersionTestDetect02);
     UtRegisterTest("DetectSshVersionTestDetect03",
                    DetectSshVersionTestDetect03);
-#endif /* UNITTESTS */
 }
-
+#endif /* UNITTESTS */

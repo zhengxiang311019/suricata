@@ -32,6 +32,7 @@
 #include "detect-filemagic.h"
 #include "util-profiling.h"
 #include "util-validate.h"
+#include "util-magic.h"
 
 typedef struct OutputLoggerThreadStore_ {
     void *thread_data;
@@ -42,6 +43,9 @@ typedef struct OutputLoggerThreadStore_ {
  *  data for the packet loggers. */
 typedef struct OutputLoggerThreadData_ {
     OutputLoggerThreadStore *store;
+#ifdef HAVE_MAGIC
+    magic_t magic_ctx;
+#endif
 } OutputLoggerThreadData;
 
 /* logger instance, a module + a output ctx,
@@ -118,13 +122,13 @@ static void OutputFileLogFfc(ThreadVars *tv,
                 bool file_logged = false;
 #ifdef HAVE_MAGIC
                 if (FileForceMagic() && ff->magic == NULL) {
-                    FilemagicGlobalLookup(ff);
+                    FilemagicThreadLookup(&op_thread_data->magic_ctx, ff);
                 }
 #endif
                 const OutputFileLogger *logger = list;
                 const OutputLoggerThreadStore *store = op_thread_data->store;
                 while (logger && store) {
-                    BUG_ON(logger->LogFunc == NULL);
+                    DEBUG_VALIDATE_BUG_ON(logger->LogFunc == NULL);
 
                     SCLogDebug("logger %p", logger);
                     PACKET_PROFILING_LOGGER_START(p, logger->logger_id);
@@ -135,8 +139,8 @@ static void OutputFileLogFfc(ThreadVars *tv,
                     logger = logger->next;
                     store = store->next;
 
-                    BUG_ON(logger == NULL && store != NULL);
-                    BUG_ON(logger != NULL && store == NULL);
+                    DEBUG_VALIDATE_BUG_ON(logger == NULL && store != NULL);
+                    DEBUG_VALIDATE_BUG_ON(logger != NULL && store == NULL);
                 }
 
                 if (file_logged) {
@@ -170,18 +174,11 @@ static TmEcode OutputFileLog(ThreadVars *tv, Packet *p, void *thread_data)
             (p->flowflags & FLOW_PKT_TOCLIENT));
     const bool file_trunc = StreamTcpReassembleDepthReached(p);
 
-    FileContainer *ffc_ts = AppLayerParserGetFiles(p->proto, f->alproto,
-                                                   f->alstate, STREAM_TOSERVER);
-    FileContainer *ffc_tc = AppLayerParserGetFiles(p->proto, f->alproto,
-                                                   f->alstate, STREAM_TOCLIENT);
+    FileContainer *ffc_ts = AppLayerParserGetFiles(f, STREAM_TOSERVER);
+    FileContainer *ffc_tc = AppLayerParserGetFiles(f, STREAM_TOCLIENT);
 
     OutputFileLogFfc(tv, op_thread_data, p, ffc_ts, file_close_ts, file_trunc, STREAM_TOSERVER);
     OutputFileLogFfc(tv, op_thread_data, p, ffc_tc, file_close_tc, file_trunc, STREAM_TOCLIENT);
-
-    if (ffc_ts && (p->flowflags & FLOW_PKT_TOSERVER))
-        FilePrune(ffc_ts);
-    if (ffc_tc && (p->flowflags & FLOW_PKT_TOCLIENT))
-        FilePrune(ffc_tc);
 
     return TM_ECODE_OK;
 }
@@ -197,6 +194,14 @@ static TmEcode OutputFileLogThreadInit(ThreadVars *tv, const void *initdata, voi
     memset(td, 0x00, sizeof(*td));
 
     *data = (void *)td;
+
+#ifdef HAVE_MAGIC
+    td->magic_ctx = MagicInitContext();
+    if (td->magic_ctx == NULL) {
+        SCFree(td);
+        return TM_ECODE_FAILED;
+    }
+#endif
 
     SCLogDebug("OutputFileLogThreadInit happy (*data %p)", *data);
 
@@ -248,6 +253,10 @@ static TmEcode OutputFileLogThreadDeinit(ThreadVars *tv, void *thread_data)
         logger = logger->next;
     }
 
+#ifdef HAVE_MAGIC
+    MagicDeinitContext(op_thread_data->magic_ctx);
+#endif
+
     SCFree(op_thread_data);
     return TM_ECODE_OK;
 }
@@ -268,10 +277,20 @@ static void OutputFileLogExitPrintStats(ThreadVars *tv, void *thread_data)
     }
 }
 
+static uint32_t OutputFileLoggerGetActiveCount(void)
+{
+    uint32_t cnt = 0;
+    for (OutputFileLogger *p = list; p != NULL; p = p->next) {
+        cnt++;
+    }
+    return cnt;
+}
+
 void OutputFileLoggerRegister(void)
 {
     OutputRegisterRootLogger(OutputFileLogThreadInit,
-        OutputFileLogThreadDeinit, OutputFileLogExitPrintStats, OutputFileLog);
+        OutputFileLogThreadDeinit, OutputFileLogExitPrintStats,
+        OutputFileLog, OutputFileLoggerGetActiveCount);
 }
 
 void OutputFileShutdown(void)

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2012 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -35,6 +35,8 @@
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 
+#include "feature.h"
+
 #include "flow.h"
 #include "flow-var.h"
 #include "flow-util.h"
@@ -57,14 +59,17 @@
  */
 #define PARSE_REGEX  "^\\s*([A-z_]+)\\s*(?:,\\s*([A-z_]+))?\\s*(?:,\\s*([A-z_]+))?\\s*$"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
-static int DetectFilestoreMatch (ThreadVars *, DetectEngineThreadCtx *,
+static int DetectFilestoreMatch (DetectEngineThreadCtx *,
         Flow *, uint8_t, File *, const Signature *, const SigMatchCtx *);
+static int DetectFilestorePostMatch(DetectEngineThreadCtx *det_ctx,
+        Packet *p, const Signature *s, const SigMatchCtx *ctx);
 static int DetectFilestoreSetup (DetectEngineCtx *, Signature *, const char *);
-static void DetectFilestoreFree(void *);
+static void DetectFilestoreFree(DetectEngineCtx *, void *);
+#ifdef UNITTESTS
 static void DetectFilestoreRegisterTests(void);
+#endif
 static int g_file_match_list_id = 0;
 
 /**
@@ -74,14 +79,20 @@ void DetectFilestoreRegister(void)
 {
     sigmatch_table[DETECT_FILESTORE].name = "filestore";
     sigmatch_table[DETECT_FILESTORE].desc = "stores files to disk if the rule matched";
-    sigmatch_table[DETECT_FILESTORE].url = DOC_URL DOC_VERSION "/rules/file-keywords.html#filestore";
+    sigmatch_table[DETECT_FILESTORE].url = "/rules/file-keywords.html#filestore";
     sigmatch_table[DETECT_FILESTORE].FileMatch = DetectFilestoreMatch;
     sigmatch_table[DETECT_FILESTORE].Setup = DetectFilestoreSetup;
     sigmatch_table[DETECT_FILESTORE].Free  = DetectFilestoreFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_FILESTORE].RegisterTests = DetectFilestoreRegisterTests;
+#endif
     sigmatch_table[DETECT_FILESTORE].flags = SIGMATCH_OPTIONAL_OPT;
 
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    sigmatch_table[DETECT_FILESTORE_POSTMATCH].name = "__filestore__postmatch__";
+    sigmatch_table[DETECT_FILESTORE_POSTMATCH].Match = DetectFilestorePostMatch;
+    sigmatch_table[DETECT_FILESTORE_POSTMATCH].Free  = DetectFilestoreFree;
+
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 
     g_file_match_list_id = DetectBufferTypeRegister("files");
 }
@@ -184,7 +195,8 @@ static int FilestorePostMatchWithOptions(Packet *p, Flow *f, const DetectFilesto
  *  When we are sure all parts of the signature matched, we run this function
  *  to finalize the filestore.
  */
-int DetectFilestorePostMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx, Packet *p, const Signature *s)
+static int DetectFilestorePostMatch(DetectEngineThreadCtx *det_ctx,
+        Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     uint8_t flags = 0;
 
@@ -202,28 +214,32 @@ int DetectFilestorePostMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx, Pack
 #endif
     }
 
-    /* set filestore depth for stream reassembling */
-    TcpSession *ssn = (TcpSession *)p->flow->protoctx;
-    TcpSessionSetReassemblyDepth(ssn, FileReassemblyDepth());
-
+    if (p->proto == IPPROTO_TCP && p->flow->protoctx != NULL) {
+        /* set filestore depth for stream reassembling */
+        TcpSession *ssn = (TcpSession *)p->flow->protoctx;
+        TcpSessionSetReassemblyDepth(ssn, FileReassemblyDepth());
+    }
     if (p->flowflags & FLOW_PKT_TOCLIENT)
         flags |= STREAM_TOCLIENT;
     else
         flags |= STREAM_TOSERVER;
 
-    FileContainer *ffc = AppLayerParserGetFiles(p->flow->proto, p->flow->alproto,
-                                                p->flow->alstate, flags);
+    for (uint16_t u = 0; u < det_ctx->filestore_cnt; u++) {
+        AppLayerParserSetStreamDepthFlag(p->flow->proto, p->flow->alproto,
+                                         FlowGetAppState(p->flow),
+                                         det_ctx->filestore[u].tx_id,
+                                         flags);
+    }
+
+    FileContainer *ffc = AppLayerParserGetFiles(p->flow, flags);
 
     /* filestore for single files only */
     if (s->filestore_ctx == NULL) {
-        uint16_t u;
-        for (u = 0; u < det_ctx->filestore_cnt; u++) {
+        for (uint16_t u = 0; u < det_ctx->filestore_cnt; u++) {
             FileStoreFileById(ffc, det_ctx->filestore[u].file_id);
         }
     } else {
-        uint16_t u;
-
-        for (u = 0; u < det_ctx->filestore_cnt; u++) {
+        for (uint16_t u = 0; u < det_ctx->filestore_cnt; u++) {
             FilestorePostMatchWithOptions(p, p->flow, s->filestore_ctx, ffc,
                     det_ctx->filestore[u].file_id, det_ctx->filestore[u].tx_id);
         }
@@ -249,7 +265,7 @@ int DetectFilestorePostMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx, Pack
  * \todo when we start supporting more protocols, the logic in this function
  *       needs to be put behind a api.
  */
-static int DetectFilestoreMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx, Flow *f,
+static int DetectFilestoreMatch (DetectEngineThreadCtx *det_ctx, Flow *f,
         uint8_t flags, File *file, const Signature *s, const SigMatchCtx *m)
 {
     uint32_t file_id = 0;
@@ -263,8 +279,27 @@ static int DetectFilestoreMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx, 
     /* file can be NULL when a rule with filestore scope > file
      * matches. */
     if (file != NULL) {
-        file_id = file->file_store_id;
+        file_id = file->file_track_id;
+        if (file->sid != NULL && s->id > 0) {
+            if (file->sid_cnt >= file->sid_max) {
+                void *p = SCRealloc(file->sid, sizeof(uint32_t) * (file->sid_max + 8));
+                if (p == NULL) {
+                    SCFree(file->sid);
+                    file->sid = NULL;
+                    file->sid_cnt = 0;
+                    file->sid_max = 0;
+                    goto continue_after_realloc_fail;
+                } else {
+                    file->sid = p;
+                    file->sid_max += 8;
+                }
+            }
+            file->sid[file->sid_cnt] = s->id;
+            file->sid_cnt++;
+        }
     }
+
+continue_after_realloc_fail:
 
     det_ctx->filestore[det_ctx->filestore_cnt].file_id = file_id;
     det_ctx->filestore[det_ctx->filestore_cnt].tx_id = det_ctx->tx_id;
@@ -292,10 +327,27 @@ static int DetectFilestoreSetup (DetectEngineCtx *de_ctx, Signature *s, const ch
 {
     SCEnter();
 
+    static bool warn_not_configured = false;
+    static uint32_t de_version = 0;
+
+    /* Check on first-time loads (includes following a reload) */
+    if (!warn_not_configured || (de_ctx->version != de_version)) {
+        if (de_version != de_ctx->version) {
+            SCLogDebug("reload-detected; re-checking feature presence; DE version now %"PRIu32,
+                       de_ctx->version);
+        }
+        if (!RequiresFeature(FEATURE_OUTPUT_FILESTORE)) {
+            SCLogWarning(SC_WARN_ALERT_CONFIG, "One or more rule(s) depends on the "
+                         "file-store output log which is not enabled. "
+                         "Enable the output \"file-store\".");
+        }
+        warn_not_configured = true;
+        de_version = de_ctx->version;
+    }
+
     DetectFilestoreData *fd = NULL;
     SigMatch *sm = NULL;
     char *args[3] = {NULL,NULL,NULL};
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
 
@@ -313,38 +365,40 @@ static int DetectFilestoreSetup (DetectEngineCtx *de_ctx, Signature *s, const ch
     sm->type = DETECT_FILESTORE;
 
     if (str != NULL && strlen(str) > 0) {
+        char str_0[32];
+        char str_1[32];
+        char str_2[32];
         SCLogDebug("str %s", str);
 
-        ret = pcre_exec(parse_regex, parse_regex_study, str, strlen(str), 0, 0, ov, MAX_SUBSTRINGS);
+        ret = DetectParsePcreExec(&parse_regex, str, 0, 0, ov, MAX_SUBSTRINGS);
         if (ret < 1 || ret > 4) {
             SCLogError(SC_ERR_PCRE_MATCH, "parse error, ret %" PRId32 ", string %s", ret, str);
             goto error;
         }
 
         if (ret > 1) {
-            const char *str_ptr;
-            res = pcre_get_substring((char *)str, ov, MAX_SUBSTRINGS, 1, &str_ptr);
+            res = pcre_copy_substring((char *)str, ov, MAX_SUBSTRINGS, 1, str_0, sizeof(str_0));
             if (res < 0) {
-                SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+                SCLogError(SC_ERR_PCRE_COPY_SUBSTRING, "pcre_copy_substring failed");
                 goto error;
             }
-            args[0] = (char *)str_ptr;
+            args[0] = (char *)str_0;
 
             if (ret > 2) {
-                res = pcre_get_substring((char *)str, ov, MAX_SUBSTRINGS, 2, &str_ptr);
+                res = pcre_copy_substring((char *)str, ov, MAX_SUBSTRINGS, 2, str_1, sizeof(str_1));
                 if (res < 0) {
-                    SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+                    SCLogError(SC_ERR_PCRE_COPY_SUBSTRING, "pcre_copy_substring failed");
                     goto error;
                 }
-                args[1] = (char *)str_ptr;
+                args[1] = (char *)str_1;
             }
             if (ret > 3) {
-                res = pcre_get_substring((char *)str, ov, MAX_SUBSTRINGS, 3, &str_ptr);
+                res = pcre_copy_substring((char *)str, ov, MAX_SUBSTRINGS, 3, str_2, sizeof(str_2));
                 if (res < 0) {
-                    SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+                    SCLogError(SC_ERR_PCRE_COPY_SUBSTRING, "pcre_copy_substring failed");
                     goto error;
                 }
-                args[2] = (char *)str_ptr;
+                args[2] = (char *)str_2;
             }
         }
 
@@ -408,6 +462,14 @@ static int DetectFilestoreSetup (DetectEngineCtx *de_ctx, Signature *s, const ch
     SigMatchAppendSMToList(s, sm, g_file_match_list_id);
     s->filestore_ctx = (const DetectFilestoreData *)sm->ctx;
 
+    sm = SigMatchAlloc();
+    if (unlikely(sm == NULL))
+        goto error;
+    sm->type = DETECT_FILESTORE_POSTMATCH;
+    sm->ctx = NULL;
+    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_POSTMATCH);
+
+
     s->flags |= SIG_FLAG_FILESTORE;
     return 0;
 
@@ -417,7 +479,7 @@ error:
     return -1;
 }
 
-static void DetectFilestoreFree(void *ptr)
+static void DetectFilestoreFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     if (ptr != NULL) {
         SCFree(ptr);
@@ -450,11 +512,9 @@ static int DetectFilestoreTest01(void)
 
     return result;
 }
-#endif /* UNITTESTS */
 
 void DetectFilestoreRegisterTests(void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("DetectFilestoreTest01", DetectFilestoreTest01);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

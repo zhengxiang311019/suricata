@@ -40,48 +40,50 @@
 #include "util-profiling.h"
 
 /* prototypes for the "ipv4-csum" rule keyword */
-static int DetectIPV4CsumMatch(ThreadVars *, DetectEngineThreadCtx *,
+static int DetectIPV4CsumMatch(DetectEngineThreadCtx *,
         Packet *, const Signature *, const SigMatchCtx *);
 static int DetectIPV4CsumSetup(DetectEngineCtx *, Signature *, const char *);
-static void DetectIPV4CsumFree(void *);
+static void DetectIPV4CsumFree(DetectEngineCtx *, void *);
 
 /* prototypes for the "tcpv4-csum" rule keyword */
-static int DetectTCPV4CsumMatch(ThreadVars *, DetectEngineThreadCtx *,
+static int DetectTCPV4CsumMatch(DetectEngineThreadCtx *,
         Packet *, const Signature *, const SigMatchCtx *);
 static int DetectTCPV4CsumSetup(DetectEngineCtx *, Signature *, const char *);
-static void DetectTCPV4CsumFree(void *);
+static void DetectTCPV4CsumFree(DetectEngineCtx *, void *);
 
 /* prototypes for the "tcpv6-csum" rule keyword */
-static int DetectTCPV6CsumMatch(ThreadVars *, DetectEngineThreadCtx *,
+static int DetectTCPV6CsumMatch(DetectEngineThreadCtx *,
         Packet *, const Signature *, const SigMatchCtx *);
 static int DetectTCPV6CsumSetup(DetectEngineCtx *, Signature *, const char *);
-static void DetectTCPV6CsumFree(void *);
+static void DetectTCPV6CsumFree(DetectEngineCtx *, void *);
 
 /* prototypes for the "udpv4-csum" rule keyword */
-static int DetectUDPV4CsumMatch(ThreadVars *, DetectEngineThreadCtx *,
+static int DetectUDPV4CsumMatch(DetectEngineThreadCtx *,
         Packet *, const Signature *, const SigMatchCtx *);
 static int DetectUDPV4CsumSetup(DetectEngineCtx *, Signature *, const char *);
-static void DetectUDPV4CsumFree(void *);
+static void DetectUDPV4CsumFree(DetectEngineCtx *, void *);
 
 /* prototypes for the "udpv6-csum" rule keyword */
-static int DetectUDPV6CsumMatch(ThreadVars *, DetectEngineThreadCtx *,
+static int DetectUDPV6CsumMatch(DetectEngineThreadCtx *,
         Packet *, const Signature *, const SigMatchCtx *);
 static int DetectUDPV6CsumSetup(DetectEngineCtx *, Signature *, const char *);
-static void DetectUDPV6CsumFree(void *);
+static void DetectUDPV6CsumFree(DetectEngineCtx *de_ctx, void *);
 
 /* prototypes for the "icmpv4-csum" rule keyword */
-static int DetectICMPV4CsumMatch(ThreadVars *, DetectEngineThreadCtx *,
+static int DetectICMPV4CsumMatch(DetectEngineThreadCtx *,
         Packet *, const Signature *, const SigMatchCtx *);
 static int DetectICMPV4CsumSetup(DetectEngineCtx *, Signature *, const char *);
-static void DetectICMPV4CsumFree(void *);
+static void DetectICMPV4CsumFree(DetectEngineCtx *, void *);
 
 /* prototypes for the "icmpv6-csum" rule keyword */
-static int DetectICMPV6CsumMatch(ThreadVars *, DetectEngineThreadCtx *,
+static int DetectICMPV6CsumMatch(DetectEngineThreadCtx *,
         Packet *, const Signature *, const SigMatchCtx *);
 static int DetectICMPV6CsumSetup(DetectEngineCtx *, Signature *, const char *);
-static void DetectICMPV6CsumFree(void *);
+static void DetectICMPV6CsumFree(DetectEngineCtx *, void *);
 
+#ifdef UNITTESTS
 static void DetectCsumRegisterTests(void);
+#endif
 
 /**
  * \brief Registers handlers for all the checksum keywords.  The checksum
@@ -131,45 +133,39 @@ void DetectCsumRegister (void)
     sigmatch_table[DETECT_IPV4_CSUM].Match = DetectIPV4CsumMatch;
     sigmatch_table[DETECT_IPV4_CSUM].Setup = DetectIPV4CsumSetup;
     sigmatch_table[DETECT_IPV4_CSUM].Free  = DetectIPV4CsumFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_IPV4_CSUM].RegisterTests = DetectCsumRegisterTests;
+#endif
 
     sigmatch_table[DETECT_TCPV4_CSUM].name = "tcpv4-csum";
     sigmatch_table[DETECT_TCPV4_CSUM].Match = DetectTCPV4CsumMatch;
     sigmatch_table[DETECT_TCPV4_CSUM].Setup = DetectTCPV4CsumSetup;
     sigmatch_table[DETECT_TCPV4_CSUM].Free  = DetectTCPV4CsumFree;
-    sigmatch_table[DETECT_TCPV4_CSUM].RegisterTests = NULL;
 
     sigmatch_table[DETECT_TCPV6_CSUM].name = "tcpv6-csum";
     sigmatch_table[DETECT_TCPV6_CSUM].Match = DetectTCPV6CsumMatch;
     sigmatch_table[DETECT_TCPV6_CSUM].Setup = DetectTCPV6CsumSetup;
     sigmatch_table[DETECT_TCPV6_CSUM].Free  = DetectTCPV6CsumFree;
-    sigmatch_table[DETECT_TCPV6_CSUM].RegisterTests = NULL;
 
     sigmatch_table[DETECT_UDPV4_CSUM].name = "udpv4-csum";
     sigmatch_table[DETECT_UDPV4_CSUM].Match = DetectUDPV4CsumMatch;
     sigmatch_table[DETECT_UDPV4_CSUM].Setup = DetectUDPV4CsumSetup;
     sigmatch_table[DETECT_UDPV4_CSUM].Free  = DetectUDPV4CsumFree;
-    sigmatch_table[DETECT_UDPV4_CSUM].RegisterTests = NULL;
 
     sigmatch_table[DETECT_UDPV6_CSUM].name = "udpv6-csum";
     sigmatch_table[DETECT_UDPV6_CSUM].Match = DetectUDPV6CsumMatch;
     sigmatch_table[DETECT_UDPV6_CSUM].Setup = DetectUDPV6CsumSetup;
     sigmatch_table[DETECT_UDPV6_CSUM].Free  = DetectUDPV6CsumFree;
-    sigmatch_table[DETECT_UDPV6_CSUM].RegisterTests = NULL;
 
     sigmatch_table[DETECT_ICMPV4_CSUM].name = "icmpv4-csum";
     sigmatch_table[DETECT_ICMPV4_CSUM].Match = DetectICMPV4CsumMatch;
     sigmatch_table[DETECT_ICMPV4_CSUM].Setup = DetectICMPV4CsumSetup;
     sigmatch_table[DETECT_ICMPV4_CSUM].Free  = DetectICMPV4CsumFree;
-    sigmatch_table[DETECT_ICMPV4_CSUM].RegisterTests = NULL;
 
     sigmatch_table[DETECT_ICMPV6_CSUM].name = "icmpv6-csum";
     sigmatch_table[DETECT_ICMPV6_CSUM].Match = DetectICMPV6CsumMatch;
     sigmatch_table[DETECT_ICMPV6_CSUM].Setup = DetectICMPV6CsumSetup;
     sigmatch_table[DETECT_ICMPV6_CSUM].Free  = DetectICMPV6CsumFree;
-    sigmatch_table[DETECT_ICMPV6_CSUM].RegisterTests = NULL;
-
-    return;
 }
 
 /**
@@ -229,7 +225,7 @@ error:
  *
  * \retval 1 if the Packet contents match the keyword option; 0 otherwise
  */
-static int DetectIPV4CsumMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectIPV4CsumMatch(DetectEngineThreadCtx *det_ctx,
         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
@@ -293,13 +289,13 @@ static int DetectIPV4CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const char
     return 0;
 
 error:
-    if (cd != NULL) DetectIPV4CsumFree(cd);
+    if (cd != NULL) DetectIPV4CsumFree(de_ctx, cd);
     if (sm != NULL) SCFree(sm);
 
     return -1;
 }
 
-static void DetectIPV4CsumFree(void *ptr)
+static void DetectIPV4CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectCsumData *cd = (DetectCsumData *)ptr;
 
@@ -324,7 +320,7 @@ static void DetectIPV4CsumFree(void *ptr)
  *
  * \retval 1 if the Packet contents match the keyword option; 0 otherwise
  */
-static int DetectTCPV4CsumMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectTCPV4CsumMatch(DetectEngineThreadCtx *det_ctx,
         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
@@ -390,13 +386,13 @@ static int DetectTCPV4CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const cha
     return 0;
 
 error:
-    if (cd != NULL) DetectTCPV4CsumFree(cd);
+    if (cd != NULL) DetectTCPV4CsumFree(de_ctx, cd);
     if (sm != NULL) SCFree(sm);
 
     return -1;
 }
 
-static void DetectTCPV4CsumFree(void *ptr)
+static void DetectTCPV4CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectCsumData *cd = (DetectCsumData *)ptr;
 
@@ -421,7 +417,7 @@ static void DetectTCPV4CsumFree(void *ptr)
  *
  * \retval 1 if the Packet contents match the keyword option; 0 otherwise
  */
-static int DetectTCPV6CsumMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectTCPV6CsumMatch(DetectEngineThreadCtx *det_ctx,
         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
@@ -487,13 +483,13 @@ static int DetectTCPV6CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const cha
     return 0;
 
 error:
-    if (cd != NULL) DetectTCPV6CsumFree(cd);
+    if (cd != NULL) DetectTCPV6CsumFree(de_ctx, cd);
     if (sm != NULL) SCFree(sm);
 
     return -1;
 }
 
-static void DetectTCPV6CsumFree(void *ptr)
+static void DetectTCPV6CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectCsumData *cd = (DetectCsumData *)ptr;
 
@@ -518,7 +514,7 @@ static void DetectTCPV6CsumFree(void *ptr)
  *
  * \retval 1 if the Packet contents match the keyword option; 0 otherwise
  */
-static int DetectUDPV4CsumMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectUDPV4CsumMatch(DetectEngineThreadCtx *det_ctx,
         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
@@ -584,13 +580,13 @@ static int DetectUDPV4CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const cha
     return 0;
 
 error:
-    if (cd != NULL) DetectUDPV4CsumFree(cd);
+    if (cd != NULL) DetectUDPV4CsumFree(de_ctx, cd);
     if (sm != NULL) SCFree(sm);
 
     return -1;
 }
 
-static void DetectUDPV4CsumFree(void *ptr)
+static void DetectUDPV4CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectCsumData *cd = (DetectCsumData *)ptr;
 
@@ -615,7 +611,7 @@ static void DetectUDPV4CsumFree(void *ptr)
  *
  * \retval 1 if the Packet contents match the keyword option; 0 otherwise
  */
-static int DetectUDPV6CsumMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectUDPV6CsumMatch(DetectEngineThreadCtx *det_ctx,
         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
@@ -681,13 +677,13 @@ static int DetectUDPV6CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const cha
     return 0;
 
 error:
-    if (cd != NULL) DetectUDPV6CsumFree(cd);
+    if (cd != NULL) DetectUDPV6CsumFree(de_ctx, cd);
     if (sm != NULL) SCFree(sm);
 
     return -1;
 }
 
-static void DetectUDPV6CsumFree(void *ptr)
+static void DetectUDPV6CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectCsumData *cd = (DetectCsumData *)ptr;
 
@@ -712,7 +708,7 @@ static void DetectUDPV6CsumFree(void *ptr)
  *
  * \retval 1 if the Packet contents match the keyword option; 0 otherwise
  */
-static int DetectICMPV4CsumMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectICMPV4CsumMatch(DetectEngineThreadCtx *det_ctx,
         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
@@ -776,13 +772,13 @@ static int DetectICMPV4CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const ch
     return 0;
 
 error:
-    if (cd != NULL) DetectICMPV4CsumFree(cd);
+    if (cd != NULL) DetectICMPV4CsumFree(de_ctx, cd);
     if (sm != NULL) SCFree(sm);
 
     return -1;
 }
 
-static void DetectICMPV4CsumFree(void *ptr)
+static void DetectICMPV4CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectCsumData *cd = (DetectCsumData *)ptr;
 
@@ -807,7 +803,7 @@ static void DetectICMPV4CsumFree(void *ptr)
  *
  * \retval 1 if the Packet contents match the keyword option; 0 otherwise
  */
-static int DetectICMPV6CsumMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectICMPV6CsumMatch(DetectEngineThreadCtx *det_ctx,
         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
@@ -874,13 +870,13 @@ static int DetectICMPV6CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const ch
     return 0;
 
 error:
-    if (cd != NULL) DetectICMPV6CsumFree(cd);
+    if (cd != NULL) DetectICMPV6CsumFree(de_ctx, cd);
     if (sm != NULL) SCFree(sm);
 
     return -1;
 }
 
-static void DetectICMPV6CsumFree(void *ptr)
+static void DetectICMPV6CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectCsumData *cd = (DetectCsumData *)ptr;
 
@@ -1038,7 +1034,7 @@ static int DetectCsumICMPV6Test01(void)
     FAIL_IF_NULL(s);
     SigGroupBuild(de_ctx);
 
-    DecodeEthernet(&tv, &dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p), NULL);
+    DecodeEthernet(&tv, &dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p));
 
     DetectEngineThreadCtxInit(&tv, (void *)de_ctx, (void *)&det_ctx);
 
@@ -1056,12 +1052,8 @@ static int DetectCsumICMPV6Test01(void)
     PASS;
 }
 
-#endif /* UNITTESTS */
-
 static void DetectCsumRegisterTests(void)
 {
-#ifdef UNITTESTS
-
     UtRegisterTest("DetectCsumValidArgsTestParse01",
                    DetectCsumValidArgsTestParse01);
     UtRegisterTest("DetectCsumInvalidArgsTestParse02",
@@ -1071,6 +1063,5 @@ static void DetectCsumRegisterTests(void)
 
     UtRegisterTest("DetectCsumICMPV6Test01",
             DetectCsumICMPV6Test01);
-
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

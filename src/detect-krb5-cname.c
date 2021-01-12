@@ -33,10 +33,8 @@
 
 #include "detect-krb5-cname.h"
 
-#ifdef HAVE_RUST
 #include "rust.h"
 #include "app-layer-krb5.h"
-#include "rust-krb-detect-gen.h"
 
 static int g_krb5_cname_buffer_id = 0;
 
@@ -47,7 +45,8 @@ struct Krb5PrincipalNameDataArgs {
 
 static int DetectKrb5CNameSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    DetectBufferSetActiveList(s, g_krb5_cname_buffer_id);
+    if (DetectBufferSetActiveList(s, g_krb5_cname_buffer_id) < 0)
+        return -1;
 
     if (DetectSignatureSetAppProto(s, ALPROTO_KRB5) != 0)
         return -1;
@@ -70,7 +69,7 @@ static InspectionBuffer *GetKrb5CNameData(DetectEngineThreadCtx *det_ctx,
         return buffer;
 
     uint32_t b_len = 0;
-    uint8_t *b = NULL;
+    const uint8_t *b = NULL;
 
     if (rs_krb5_tx_get_cname(cbdata->txv, (uint16_t)cbdata->local_id, &b, &b_len) != 1)
         return NULL;
@@ -109,11 +108,11 @@ static int DetectEngineInspectKrb5CName(
         det_ctx->inspection_recursion_counter = 0;
 
         const int match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd,
-                                              f,
+                                              NULL, f,
                                               (uint8_t *)buffer->inspect,
                                               buffer->inspect_len,
                                               buffer->inspect_offset, DETECT_CI_FLAGS_SINGLE,
-                                              DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE, NULL);
+                                              DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
         if (match == 1) {
             return DETECT_ENGINE_INSPECT_SIG_MATCH;
         }
@@ -176,25 +175,27 @@ static void PrefilterMpmKrb5NameFree(void *ptr)
 
 static int PrefilterMpmKrb5CNameRegister(DetectEngineCtx *de_ctx,
         SigGroupHead *sgh, MpmCtx *mpm_ctx,
-        const DetectMpmAppLayerRegistery *mpm_reg, int list_id)
+        const DetectBufferMpmRegistery *mpm_reg, int list_id)
 {
     PrefilterMpmKrb5Name *pectx = SCCalloc(1, sizeof(*pectx));
     if (pectx == NULL)
         return -1;
     pectx->list_id = list_id;
     pectx->mpm_ctx = mpm_ctx;
-    pectx->transforms = &mpm_reg->v2.transforms;
+    pectx->transforms = &mpm_reg->transforms;
 
     return PrefilterAppendTxEngine(de_ctx, sgh, PrefilterTxKrb5CName,
-            mpm_reg->v2.alproto, mpm_reg->v2.tx_min_progress,
+            mpm_reg->app_v2.alproto, mpm_reg->app_v2.tx_min_progress,
             pectx, PrefilterMpmKrb5NameFree, mpm_reg->name);
 }
 
 void DetectKrb5CNameRegister(void)
 {
-    sigmatch_table[DETECT_AL_KRB5_CNAME].name = "krb5_cname";
+    sigmatch_table[DETECT_AL_KRB5_CNAME].name = "krb5.cname";
+    sigmatch_table[DETECT_AL_KRB5_CNAME].alias = "krb5_cname";
+    sigmatch_table[DETECT_AL_KRB5_CNAME].url = "/rules/kerberos-keywords.html#krb5-cname";
     sigmatch_table[DETECT_AL_KRB5_CNAME].Setup = DetectKrb5CNameSetup;
-    sigmatch_table[DETECT_AL_KRB5_CNAME].flags |= SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_AL_KRB5_CNAME].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_STICKY_BUFFER;
     sigmatch_table[DETECT_AL_KRB5_CNAME].desc = "sticky buffer to match on Kerberos 5 client name";
 
     DetectAppLayerMpmRegister2("krb5_cname", SIG_FLAG_TOCLIENT, 2,
@@ -210,9 +211,3 @@ void DetectKrb5CNameRegister(void)
 
     g_krb5_cname_buffer_id = DetectBufferTypeGetByName("krb5_cname");
 }
-
-#else /* NO RUST */
-
-void DetectKrb5CNameRegister(void) {}
-
-#endif

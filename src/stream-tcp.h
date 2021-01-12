@@ -73,7 +73,7 @@ typedef struct StreamTcpThread_ {
     /** queue for pseudo packet(s) that were created in the stream
      *  process and need further handling. Currently only used when
      *  receiving (valid) RST packets */
-    PacketQueue pseudo_queue;
+    PacketQueueNoLock pseudo_queue;
 
     uint16_t counter_tcp_sessions;
     /** sessions not picked up because memcap was reached */
@@ -103,7 +103,7 @@ typedef struct StreamTcpThread_ {
     TcpReassemblyThreadCtx *ra_ctx;
 } StreamTcpThread;
 
-TcpStreamCnf stream_config;
+extern TcpStreamCnf stream_config;
 void StreamTcpInitConfig (char);
 void StreamTcpFreeConfig(char);
 void StreamTcpRegisterTests (void);
@@ -138,8 +138,10 @@ int StreamReassembleRaw(TcpSession *ssn, const Packet *p,
         uint64_t *progress_out, bool respect_inspect_depth);
 void StreamReassembleRawUpdateProgress(TcpSession *ssn, Packet *p, uint64_t progress);
 
-void StreamTcpDetectLogFlush(ThreadVars *tv, StreamTcpThread *stt, Flow *f, Packet *p, PacketQueue *pq);
+void StreamTcpDetectLogFlush(ThreadVars *tv, StreamTcpThread *stt, Flow *f, Packet *p, PacketQueueNoLock *pq);
 
+const char *StreamTcpStateAsString(const enum TcpState);
+const char *StreamTcpSsnStateAsString(const TcpSession *ssn);
 
 /** ------- Inline functions: ------ */
 
@@ -164,38 +166,6 @@ static inline int StreamTcpCheckFlowDrops(Packet *p)
     return 0;
 }
 
-/**
- *  \brief  Function to flip the direction When we missed the SYN packet,
- *          SYN/ACK is considered as sent by server, but our engine flagged the
- *          packet as from client for the host whose packet is received first in
- *          the session.
- *
- *  \param  ssn TcpSession to whom this packet belongs
- *  \param  p   Packet whose flag has to be changed
- */
-static inline void StreamTcpPacketSwitchDir(TcpSession *ssn, Packet *p)
-{
-    SCLogDebug("ssn %p: switching pkt direction", ssn);
-
-    if (PKT_IS_TOSERVER(p)) {
-        p->flowflags &= ~FLOW_PKT_TOSERVER;
-        p->flowflags |= FLOW_PKT_TOCLIENT;
-
-        if (p->flowflags & FLOW_PKT_TOSERVER_FIRST) {
-            p->flowflags &= ~FLOW_PKT_TOSERVER_FIRST;
-            p->flowflags |= FLOW_PKT_TOCLIENT_FIRST;
-        }
-    } else {
-        p->flowflags &= ~FLOW_PKT_TOCLIENT;
-        p->flowflags |= FLOW_PKT_TOSERVER;
-
-        if (p->flowflags & FLOW_PKT_TOCLIENT_FIRST) {
-            p->flowflags &= ~FLOW_PKT_TOCLIENT_FIRST;
-            p->flowflags |= FLOW_PKT_TOSERVER_FIRST;
-        }
-    }
-}
-
 enum {
     /* stream has no segments for forced reassembly, nor for detection */
     STREAM_HAS_UNPROCESSED_SEGMENTS_NONE = 0,
@@ -204,14 +174,14 @@ enum {
     STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION = 1,
 };
 
-TmEcode StreamTcp (ThreadVars *, Packet *, void *, PacketQueue *, PacketQueue *);
+TmEcode StreamTcp (ThreadVars *, Packet *, void *, PacketQueueNoLock *);
 int StreamNeedsReassembly(const TcpSession *ssn, uint8_t direction);
 TmEcode StreamTcpThreadInit(ThreadVars *, void *, void **);
 TmEcode StreamTcpThreadDeinit(ThreadVars *tv, void *data);
 void StreamTcpRegisterTests (void);
 
 int StreamTcpPacket (ThreadVars *tv, Packet *p, StreamTcpThread *stt,
-                     PacketQueue *pq);
+                     PacketQueueNoLock *pq);
 /* clear ssn and return to pool */
 void StreamTcpSessionClear(void *ssnptr);
 /* cleanup ssn, but don't free ssn */
@@ -224,6 +194,9 @@ int StreamTcpInlineDropInvalid(void);
 int StreamTcpInlineMode(void);
 
 int TcpSessionPacketSsnReuse(const Packet *p, const Flow *f, const void *tcp_ssn);
+
+void StreamTcpUpdateAppLayerProgress(TcpSession *ssn, char direction,
+        const uint32_t progress);
 
 #endif /* __STREAM_TCP_H__ */
 

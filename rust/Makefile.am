@@ -1,73 +1,96 @@
-EXTRA_DIST = 	Cargo.toml \
-		src \
+EXTRA_DIST =	src \
 		.cargo/config.in \
-		gen-c-headers.py
-
-if HAVE_RUST
-
-EXTRA_DIST +=	Cargo.lock
+		cbindgen.toml \
+		dist/rust-bindings.h
 
 if HAVE_CARGO_VENDOR
 EXTRA_DIST +=	vendor
 endif
 
-if HAVE_RUST_VENDOR
-FROZEN = --frozen
-endif
-
-if !RUST_DEBUG
 if !DEBUG
 RELEASE = --release
 endif
+
+if RUST_BUILD_STD
+NIGHTLY_ARGS = -Z build-std
 endif
 
 if HAVE_LUA
-RUST_FEATURES +=	lua
+RUST_FEATURES +=	lua $(LUA_INT8)
 endif
 
 if DEBUG
 RUST_FEATURES +=	debug
 endif
 
-all-local:
-if HAVE_PYTHON
-	cd $(top_srcdir)/rust && $(HAVE_PYTHON) ./gen-c-headers.py
+if DEBUG_VALIDATION
+RUST_FEATURES +=	debug-validate
 endif
-	cd $(top_srcdir)/rust && \
-		CARGO_HOME=$(CARGO_HOME) \
-		CARGO_TARGET_DIR=$(abs_top_builddir)/rust/target \
-		$(CARGO) build $(RELEASE) $(FROZEN) \
-			--features "$(RUST_FEATURES)"
+
+if RUST_CROSS_COMPILE 
+RUST_TARGET = --target $(host_triplet)
+endif
+
+all-local:
+if HAVE_CYGPATH
+	@rustup_home@ \
+		CARGO_HOME="$(CARGO_HOME)" \
+		CARGO_TARGET_DIR="$(e_rustdir)/target" \
+		$(CARGO) build $(RELEASE) \
+			--features "$(RUST_FEATURES)" $(RUST_TARGET)
+else
+	@rustup_home@ \
+		CARGO_HOME="$(CARGO_HOME)" \
+		CARGO_TARGET_DIR="$(abs_top_builddir)/rust/target" \
+		$(CARGO) build $(RELEASE) $(NIGHTLY_ARGS) \
+			--features "$(RUST_FEATURES)" $(RUST_TARGET)
+endif
+	if test -e $(RUST_SURICATA_LIBDIR)/suricata.lib; then \
+		cp $(RUST_SURICATA_LIBDIR)/suricata.lib \
+			$(RUST_SURICATA_LIBDIR)/libsuricata.a; \
+	fi
+	$(MAKE) gen/rust-bindings.h
 
 clean-local:
-	-rm -rf target
+	rm -rf target
+if HAVE_CBINDGEN
+	rm -rf gen dist
+endif
 
-distclean-local: clean-local
-	rm -rf vendor gen Cargo.lock
+distclean-local:
+	rm -f Cargo.lock
+
+maintainerclean-local:
+	rm -rf vendor gen
 
 check:
-	CARGO_HOME=$(CARGO_HOME) $(CARGO) test
-
-Cargo.lock: Cargo.toml
-	CARGO_HOME=$(CARGO_HOME) $(CARGO) generate-lockfile
+	CARGO_HOME="$(CARGO_HOME)" @rustup_home@ \
+		CARGO_TARGET_DIR="$(abs_top_builddir)/rust/target" \
+		$(CARGO) test $(RELEASE) --features "$(RUST_FEATURES)"
 
 if HAVE_CARGO_VENDOR
 vendor:
-	CARGO_HOME=$(CARGO_HOME) $(CARGO) vendor > /dev/null
+	CARGO_HOME="$(CARGO_HOME)" @rustup_home@ $(CARGO) vendor > /dev/null
 else
 vendor:
 endif
 
-# Can only include the headers if we have Python to generate them.
-if HAVE_PYTHON
-EXTRA_DIST +=	gen/c-headers
-gen/c-headers:
-	cd $(top_srcdir)/rust && $(HAVE_PYTHON) ./gen-c-headers.py
+if HAVE_CBINDGEN
+gen/rust-bindings.h: $(RUST_SURICATA_LIB)
+	rm -f gen/rust-bindings.h
+	cbindgen --config $(abs_top_srcdir)/rust/cbindgen.toml \
+		--quiet --output $(abs_top_builddir)/rust/gen/rust-bindings.h
 else
-gen/c-headers:
+gen/rust-bindings.h:
 endif
-else # HAVE_RUST
 
-all-local clean-local check vendor gen/c-headers:
+doc:
+	CARGO_HOME=$(CARGO_HOME) $(CARGO) doc --all-features --no-deps
 
-endif # HAVE_RUST
+if HAVE_CBINDGEN
+dist/rust-bindings.h:
+	cbindgen --config $(abs_top_srcdir)/rust/cbindgen.toml \
+		--quiet --output $(abs_top_builddir)/rust/dist/rust-bindings.h
+else
+dist/rust-bindings.h:
+endif

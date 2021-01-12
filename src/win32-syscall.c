@@ -51,6 +51,7 @@
 #undef _snprintf
 #define _snprintf StringCbPrintfA
 
+#include "suricata-common.h"
 #include "util-debug.h"
 #include "util-device.h"
 #include "util-mem.h"
@@ -209,12 +210,6 @@ const char *Win32GetErrorString(DWORD error_code, HMODULE ext_module)
 }
 
 #ifdef DEBUG
-#define Win32HResultLogDebug(hr)                                               \
-    _Win32HResultLog(SC_LOG_DEBUG, (hr), __FILE__, __FUNCTION__, __LINE__)
-#else
-#define Win32HResultLogDebug(hr)
-#endif /* DEBUG */
-
 /**
  * \brief log an HRESULT
  */
@@ -226,6 +221,12 @@ static void _Win32HResultLog(SCLogLevel level, HRESULT hr, const char *file,
           (uint32_t)(hr));
     LocalFree((LPVOID)err_str);
 }
+
+#define Win32HResultLogDebug(hr)                                               \
+    _Win32HResultLog(SC_LOG_DEBUG, (hr), __FILE__, __FUNCTION__, __LINE__)
+#else
+#define Win32HResultLogDebug(hr)
+#endif /* DEBUG */
 
 /**
  * \brief log a WBEM error

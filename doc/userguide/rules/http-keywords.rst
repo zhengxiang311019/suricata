@@ -2,71 +2,79 @@ HTTP Keywords
 =============
 .. role:: example-rule-emphasis
 
-There are additional content modifiers that can provide protocol-specific
-capabilities at the application layer. More information can be found at
-:doc:`payload-keywords` These keywords make sure the signature checks only
-specific parts of the network traffic. For instance, to check specifically on
-the request URI, cookies, or the HTTP request or response body, etc.
+Using the HTTP specific sticky buffers provides a way to efficiently
+inspect specific fields of the HTTP protocol. After specifying a
+sticky buffer in a rule it should be followed by one or more doc:`payload-keywords`.
 
-All HTTP keywords are modifiers. Note the difference between content modifiers
-and sticky buffers. See :ref:`rules-modifiers` for more information. As a
+Many of the sticky buffers have legacy variants in the older "content modifier"
+notation. See :ref:`rules-modifiers` for more information. As a
 refresher:
+
+* **'sticky buffers'** are placed first and all keywords following it apply to that buffer, for instance::
+
+      alert http any any -> any any (http.response_line; content:"403 Forbidden"; sid:1;)
+
+  Sticky buffers apply to all "payload" keywords following it. E.g. `content`, `isdataat`, `byte_test`, `pcre`.
 
 * **'content modifiers'** look back in the rule, e.g.::
 
       alert http any any -> any any (content:"index.php"; http_uri; sid:1;)
 
-* **'sticky buffers'** are placed first and all keywords following it apply to that buffer, for instance::
-
-      alert http any any -> any any (http_response_line; content:"403 Forbidden"; sid:1;)
+  Content modifiers only apply to the preceding `content` keyword.
 
 The following **request** keywords are available:
 
 ============================== ======================== ==================
-Keyword                        Sticky or Modifier       Direction
+Keyword                        Legacy Content Modifier  Direction
 ============================== ======================== ==================
-http_uri                       Modifier                 Request
-http_raw_uri                   Modifier                 Request
-http_method                    Modifier                 Request
-http_request_line              Sticky Buffer            Request
-http_client_body               Modifier                 Request
-http_header                    Modifier                 Both
-http_raw_header                Modifier                 Both
-http_cookie                    Modifier                 Both
-http_user_agent                Modifier                 Request
-http_host                      Modifier                 Request
-http_raw_host                  Modifier                 Request
-http_accept                    Sticky Buffer            Request
-http_accept_lang               Sticky Buffer            Request
-http_accept_enc                Sticky Buffer            Request
-http_referer                   Sticky Buffer            Request
-http_connection                Sticky Buffer            Request
-http_content_type              Sticky Buffer            Both
-http_content_len               Sticky Buffer            Both
-http_start                     Sticky Buffer            Both
-http_protocol                  Sticky Buffer            Both
-http_header_names              Sticky Buffer            Both
+http.uri                       http_uri                 Request
+http.uri.raw                   http_raw_uri             Request
+http.method                    http_method              Request
+http.request_line              http_request_line (*)    Request
+http.request_body              http_client_body         Request
+http.header                    http_header              Both
+http.header.raw                http_raw_header          Both
+http.cookie                    http_cookie              Both
+http.user_agent                http_user_agent          Request
+http.host                      http_host                Request
+http.host.raw                  http_raw_host            Request
+http.accept                    http_accept (*)          Request
+http.accept_lang               http_accept_lang (*)     Request
+http.accept_enc                http_accept_enc (*)      Request
+http.referer                   http_referer (*)         Request
+http.connection                http_connection (*)      Request
+http.content_type              http_content_type (*)    Both
+http.content_len               http_content_len (*)     Both
+http.start                     http_start (*)           Both
+http.protocol                  http_protocol (*)        Both
+http.header_names              http_header_names (*)    Both
 ============================== ======================== ==================
+
+\*) sticky buffer
 
 The following **response** keywords are available:
 
 ============================== ======================== ==================
-Keyword                        Sticky or Modifier       Direction
+Keyword                        Legacy Content Modifier  Direction
 ============================== ======================== ==================
-http_stat_msg                  Modifier                 Response
-http_stat_code                 Modifier                 Response
-http_response_line             Sticky Buffer            Response
-http_header                    Modifier                 Both
-http_raw_header                Modifier                 Both
-http_cookie                    Modifier                 Both
-http_server_body               Modifier                 Response
-file_data                      Sticky Buffer            Response
-http_content_type              Sticky Buffer            Both
-http_content_len               Sticky Buffer            Both
-http_start                     Sticky Buffer            Both
-http_protocol                  Sticky Buffer            Both
-http_header_names              Sticky Buffer            Both
+http.stat_msg                  http_stat_msg            Response
+http.stat_code                 http_stat_code           Response
+http.response_line             http_response_line (*)   Response
+http.header                    http_header              Both
+http.header.raw                http_raw_header          Both
+http.cookie                    http_cookie              Both
+http.response_body             http_server_body         Response
+http.server                    N/A                      Response
+http.location                  N/A                      Response
+file.data                      file_data (*)            Response
+http.content_type              http_content_type (*)    Both
+http.content_len               http_content_len (*)     Both
+http.start                     http_start (*)           Both
+http.protocol                  http_protocol (*)        Both
+http.header_names              http_header_names (*)    Both
 ============================== ======================== ==================
+
+\*) sticky buffer
 
 HTTP Primer
 -----------
@@ -79,11 +87,39 @@ responses. A simple example of a HTTP request and response follows:
 
    GET /index.html HTTP/1.0\r\n
 
-GET is a request **method**.  Examples of methods are: GET, POST, PUT,
+GET is the request **method**.  Examples of methods are: GET, POST, PUT,
 HEAD, etc. The URI path is ``/index.html`` and the HTTP version is
 ``HTTP/1.0``. Several HTTP versions have been used over the years; of
 the versions 0.9, 1.0 and 1.1, 1.0 and 1.1 are the most commonly used
 today.
+
+Example request with keywords:
+
++--------------------------------+------------------+
+| HTTP                           | Keyword          |
++--------------------------------+------------------+
+| GET /index.html HTTP/1.1\\r\\n | http.request_line|
++--------------------------------+------------------+
+| Host: www.oisf.net\\r\\n       | http.header      |
++--------------------------------+------------------+
+| Cookie: **<cookie data>**      | http.cookie      |
++--------------------------------+------------------+
+
+Example request with finer grained keywords:
+
++------------------------------------------+---------------------+
+| HTTP                                     | Keyword             |
++------------------------------------------+---------------------+
+| **GET** */index.html* **HTTP/1.1**\\r\\n | **http.method**     |
+|                                          | *http.uri*          |
+|                                          | **http.protocol**   |
++------------------------------------------+---------------------+
+| Host: **www.oisf.net**\\r\\n             | **http.host**       |
+|                                          +---------------------+
+| User-Agent: **Mozilla/5.0**\\r\\n        | **http.user_agent** |
++------------------------------------------+---------------------+
+| Cookie: **<cookie data>**                | **http.cookie**     |
++------------------------------------------+---------------------+
 
 **HTTP response**
 
@@ -97,23 +133,9 @@ today.
 In this example, HTTP/1.0 is the HTTP version, 200 the response status
 code and OK the response status message.
 
-Another more detailed example:
-
-Request:
-
-.. image:: http-keywords/request.png
-
-Response:
-
-.. image:: http-keywords/response1.png
-
-Request:
-
-.. image:: http-keywords/request2.png
-
 Although cookies are sent in an HTTP header, you can not match on them
-with the ``http_header`` keyword. Cookies are matched with their own
-keyword, namely ``http_cookie``.
+with the ``http.header`` keyword. Cookies are matched with their own
+keyword, namely ``http.cookie``.
 
 Each part of the table belongs to a so-called *buffer*. The HTTP
 method belongs to the method buffer, HTTP headers to the header buffer
@@ -126,10 +148,10 @@ relative modifiers, so they may only be used within the same
 buffer. You can not relate content matches against different buffers
 with relative modifiers.
 
-http_method
+http.method
 -----------
 
-With the ``http_method`` content modifier, it is possible to match
+With the ``http.method`` content modifier, it is possible to match
 specifically and only on the HTTP method buffer. The keyword can be
 used in combination with all previously mentioned content modifiers
 such as: ``depth``, ``distance``, ``offset``, ``nocase`` and ``within``.
@@ -151,28 +173,34 @@ Example of the purpose of method:
 
 .. _rules-http-uri-normalization:
 
-http_uri and http_raw_uri
+http.uri and http.uri.raw
 -------------------------
 
-With the ``http_uri`` and the ``http_raw_uri`` content modifiers, it
+With the ``http.uri`` and the ``http.uri.raw`` content modifiers, it
 is possible to match specifically and only on the request URI
 buffer. The keyword can be used in combination with all previously
 mentioned content modifiers like ``depth``, ``distance``, ``offset``,
 ``nocase`` and ``within``.
 
-The uri has two appearances in Suricata: the raw_uri and the
+The uri has two appearances in Suricata: the uri.raw and the
 normalized uri. The space for example can be indicated with the
 heximal notation %20. To convert this notation in a space, means
 normalizing it. It is possible though to match specific on the
-characters %20 in a uri. This means matching on the raw_uri.  The
-raw_uri and the normalized uri are separate buffers. So, the raw_uri
-inspects the raw_uri buffer and can not inspect the normalized buffer.
+characters %20 in a uri. This means matching on the uri.raw. The
+uri.raw and the normalized uri are separate buffers. So, the uri.raw
+inspects the uri.raw buffer and can not inspect the normalized buffer.
+
+.. note:: uri.raw never has any spaces in it.
+          With this request line ``GET /uid=0(root) gid=0(root) HTTP/1.1``,
+          the ``http.uri.raw`` will match ``/uid=0(root)``
+          and ``http.protocol`` will match ``gid=0(root) HTTP/1.1``
+          Reference: `https://redmine.openinfosecfoundation.org/issues/2881 <https://redmine.openinfosecfoundation.org/issues/2881>`_
 
 Example of the URI in a HTTP request:
 
 .. image:: http-keywords/uri1.png
 
-Example of the purpose of ``http_uri``:
+Example of the purpose of ``http.uri``:
 
 .. image:: http-keywords/uri.png
 
@@ -180,7 +208,7 @@ uricontent
 ----------
 
 The ``uricontent`` keyword has the exact same effect as the
-``http_uri`` content modifier. ``uricontent`` is a deprecated
+``http.uri`` content modifier. ``uricontent`` is a deprecated
 (although still supported) way to match specifically and only on the
 request URI buffer.
 
@@ -190,14 +218,14 @@ Example of ``uricontent``:
 
     alert tcp $HOME_NET any -> $EXTERNAL_NET $HTTP_PORTS (msg:"ET TROJAN Possible Vundo Trojan Variant reporting to Controller"; flow:established,to_server; content:"POST "; depth:5; :example-rule-emphasis:`uricontent:"/frame.html?";` urilen: > 80; classtype:trojan-activity; reference:url,doc.emergingthreats.net/2009173; reference:url,www.emergingthreats.net/cgi-bin/cvsweb.cgi/sigs/VIRUS/TROJAN_Vundo; sid:2009173; rev:2;)
 
-The difference between ``http_uri`` and ``uricontent`` is the syntax:
+The difference between ``http.uri`` and ``uricontent`` is the syntax:
 
 .. image:: http-keywords/uricontent1.png
 
 .. image:: http-keywords/http_uri.png
 
-When authoring new rules, it is recommended that the ``http_uri``
-content modifier be used rather than the deprecated ``uricontent``
+When authoring new rules, it is recommended that the ``http.uri``
+content sticky buffer be used rather than the deprecated ``uricontent``
 keyword.
 
 urilen
@@ -231,34 +259,43 @@ Example of ``urilen`` in a signature:
 You can also append ``norm`` or ``raw`` to define what sort of buffer you want
 to use (normalized or raw buffer).
 
-http_protocol
+http.protocol
 -------------
 
-The ``http_protocol`` inspects the protocol field from the HTTP request or
+The ``http.protocol`` inspects the protocol field from the HTTP request or
 response line. If the request line is 'GET / HTTP/1.0\r\n', then this buffer
 will contain 'HTTP/1.0'.
 
 Example::
 
-    alert http any any -> any any (flow:to_server; http_protocol; content:"HTTP/1.0"; sid:1;)
+    alert http any any -> any any (flow:to_server; http.protocol; content:"HTTP/1.0"; sid:1;)
 
-http_request_line
------------------
-
-The ``http_request_line`` forces the whole HTTP request line to be inspected.
+``http.protocol`` replaces the previous keyword name: ```http_protocol``. You may continue
++to use the previous name, but it's recommended that rules be converted to use
++the new name.
 
 Example::
 
-    alert http any any -> any any (http_request_line; content:"GET / HTTP/1.0"; sid:1;)
+    alert http any any -> any any (flow:to_server; http.protocol; content:"HTTP/1.0"; sid:1;)
 
-http_header and http_raw_header
+
+http.request_line
+-----------------
+
+The ``http.request_line`` forces the whole HTTP request line to be inspected.
+
+Example::
+
+    alert http any any -> any any (http.request_line; content:"GET / HTTP/1.0"; sid:1;)
+
+http.header and http.header.raw
 -------------------------------
 
-With the ``http_header`` content modifier, it is possible to match
+With the ``http.header`` content modifier, it is possible to match
 specifically and only on the HTTP header buffer. This contains all of
 the extracted headers in a single buffer, except for those indicated
 in the documentation that are not able to match by this buffer and
-have their own content modifier (e.g. ``http_cookie``). The modifier
+have their own content modifier (e.g. ``http.cookie``). The modifier
 can be used in combination with all previously mentioned content
 modifiers, like ``depth``, ``distance``, ``offset``, ``nocase`` and
 ``within``.
@@ -266,20 +303,23 @@ modifiers, like ``depth``, ``distance``, ``offset``, ``nocase`` and
     **Note**: the header buffer is *normalized*. Any trailing
     whitespace and tab characters are removed. See:
     https://lists.openinfosecfoundation.org/pipermail/oisf-users/2011-October/000935.html.
-    To avoid that, use the ``http_raw_header`` keyword.
+    If there are multiple values for the same header name, they are
+    concatenated with a comma and space (", ") between each of them.
+    See RFC 2616 4.2 Message Headers.
+    To avoid that, use the ``http.header.raw`` keyword.
 
 Example of a header in a HTTP request:
 
 .. image:: http-keywords/header.png
 
-Example of the purpose of ``http_header``:
+Example of the purpose of ``http.header``:
 
 .. image:: http-keywords/header1.png
 
-http_cookie
+http.cookie
 -----------
 
-With the ``http_cookie`` content modifier, it is possible to match
+With the ``http.cookie`` content modifier, it is possible to match
 specifically and only on the cookie buffer. The keyword can be used in
 combination with all previously mentioned content modifiers like
 ``depth``, ``distance``, ``offset``, ``nocase`` and ``within``.
@@ -292,14 +332,14 @@ Example of a cookie in a HTTP request:
 
 .. image:: http-keywords/cookie.png
 
-Example of the purpose of ``http_cookie``:
+Example of the purpose of ``http.cookie``:
 
 .. image:: http-keywords/cookie1.png
 
-http_user_agent
+http.user_agent
 ---------------
 
-The ``http_user_agent`` content modifier is part of the HTTP request
+The ``http.user_agent`` content modifier is part of the HTTP request
 header. It makes it possible to match specifically on the value of the
 User-Agent header. It is normalized in the sense that it does not
 include the _"User-Agent: "_ header name and separator, nor does it
@@ -310,30 +350,30 @@ modifiers like ``depth``, ``distance``, ``offset``, ``nocase`` and
 buffer when using the ``/V`` modifier.
 
 Normalization: leading spaces **are not** part of this buffer. So
-"User-Agent: \r\n" will result in an empty ``http_user_agent`` buffer.
+"User-Agent: \r\n" will result in an empty ``http.user_agent`` buffer.
 
 Example of the User-Agent header in a HTTP request:
 
 .. image:: http-keywords/user_agent.png
 
-Example of the purpose of ``http_user_agent``:
+Example of the purpose of ``http.user_agent``:
 
 .. image:: http-keywords/user_agent_match.png
 
 Notes
 ~~~~~
 
--  The ``http_user_agent`` buffer will NOT include the header name,
+-  The ``http.user_agent`` buffer will NOT include the header name,
    colon, or leading whitespace.  i.e. it will not include
    "User-Agent: ".
 
--  The ``http_user_agent`` buffer does not include a CRLF (0x0D
+-  The ``http.user_agent`` buffer does not include a CRLF (0x0D
    0x0A) at the end.  If you want to match the end of the buffer, use a
    relative ``isdataat`` or a PCRE (although PCRE will be worse on
    performance).
 
 -  If a request contains multiple "User-Agent" headers, the values will
-   be concatenated in the ``http_user_agent`` buffer, in the order
+   be concatenated in the ``http.user_agent`` buffer, in the order
    seen from top to bottom, with a comma and space (", ") between each
    of them.
 
@@ -343,19 +383,19 @@ Notes
           User-Agent: SuriTester/0.8
           User-Agent: GGGG
 
-   ``http_user_agent`` buffer contents::
+   ``http.user_agent`` buffer contents::
 
           SuriTester/0.8, GGGG
 
 -  Corresponding PCRE modifier: ``V``
 
--  Using the ``http_user_agent`` buffer is more efficient when it
-   comes to performance than using the ``http_header`` buffer (~10%
+-  Using the ``http.user_agent`` buffer is more efficient when it
+   comes to performance than using the ``http.header`` buffer (~10%
    better).
 
 -  `https://blog.inliniac.net/2012/07/09/suricata-http\_user\_agent-vs-http\_header/ <https://blog.inliniac.net/2012/07/09/suricata-http_user_agent-vs-http_header/>`_
 
-http_accept
+http.accept
 -----------
 
 Sticky buffer to match on the HTTP Accept header. Only contains the header
@@ -363,9 +403,9 @@ value. The \\r\\n after the header are not part of the buffer.
 
 Example::
 
-    alert http any any -> any any (http_accept; content:"image/gif"; sid:1;)
+    alert http any any -> any any (http.accept; content:"image/gif"; sid:1;)
 
-http_accept_enc
+http.accept_enc
 ---------------
 
 Sticky buffer to match on the HTTP Accept-Encoding header. Only contains the
@@ -373,10 +413,10 @@ header value. The \\r\\n after the header are not part of the buffer.
 
 Example::
 
-    alert http any any -> any any (http_accept_enc; content:"gzip"; sid:1;)
+    alert http any any -> any any (http.accept_enc; content:"gzip"; sid:1;)
 
 
-http_accept_lang
+http.accept_lang
 ----------------
 
 Sticky buffer to match on the HTTP Accept-Language header. Only contains the
@@ -384,10 +424,10 @@ header value. The \\r\\n after the header are not part of the buffer.
 
 Example::
 
-    alert http any any -> any any (http_accept_lang; content:"en-us"; sid:1;)
+    alert http any any -> any any (http.accept_lang; content:"en-us"; sid:1;)
 
 
-http_connection
+http.connection
 ---------------
 
 Sticky buffer to match on the HTTP Connection header. Only contains the
@@ -395,10 +435,10 @@ header value. The \\r\\n after the header are not part of the buffer.
 
 Example::
 
-    alert http any any -> any any (http_connection; content:"keep-alive"; sid:1;)
+    alert http any any -> any any (http.connection; content:"keep-alive"; sid:1;)
 
 
-http_content_type
+http.content_type
 -----------------
 
 Sticky buffer to match on the HTTP Content-Type headers. Only contains the
@@ -409,13 +449,13 @@ Use flow:to_server or flow:to_client to force inspection of request or response.
 Examples::
 
     alert http any any -> any any (flow:to_server; \
-            http_content_type; content:"x-www-form-urlencoded"; sid:1;)
+            http.content_type; content:"x-www-form-urlencoded"; sid:1;)
 
     alert http any any -> any any (flow:to_client; \
-            http_content_type; content:"text/javascript"; sid:2;)
+            http.content_type; content:"text/javascript"; sid:2;)
 
 
-http_content_len
+http.content_len
 ----------------
 
 Sticky buffer to match on the HTTP Content-Length headers. Only contains the
@@ -426,19 +466,19 @@ Use flow:to_server or flow:to_client to force inspection of request or response.
 Examples::
 
     alert http any any -> any any (flow:to_server; \
-            http_content_len; content:"666"; sid:1;)
+            http.content_len; content:"666"; sid:1;)
 
     alert http any any -> any any (flow:to_client; \
-            http_content_len; content:"555"; sid:2;)
+            http.content_len; content:"555"; sid:2;)
 
 To do a numeric inspection of the content length, ``byte_test`` can be used.
 
 Example, match if C-L is equal to or bigger than 8079::
 
     alert http any any -> any any (flow:to_client; \
-            http_content_len; byte_test:0,>=,8079,0,string,dec; sid:3;)
+            http.content_len; byte_test:0,>=,8079,0,string,dec; sid:3;)
 
-http_referer
+http.referer
 ---------------
 
 Sticky buffer to match on the HTTP Referer header. Only contains the
@@ -446,23 +486,23 @@ header value. The \\r\\n after the header are not part of the buffer.
 
 Example::
 
-    alert http any any -> any any (http_referer; content:".php"; sid:1;)
+    alert http any any -> any any (http.referer; content:".php"; sid:1;)
 
-http_start
+http.start
 ----------
 
 Inspect the start of a HTTP request or response. This will contain the
-request/reponse line plus the request/response headers. Use flow:to_server
+request/response line plus the request/response headers. Use flow:to_server
 or flow:to_client to force inspection of request or response.
 
 Example::
 
-    alert http any any -> any any (http_start; content:"HTTP/1.1|0d 0a|User-Agent"; sid:1;)
+    alert http any any -> any any (http.start; content:"HTTP/1.1|0d 0a|User-Agent"; sid:1;)
 
 The buffer contains the normalized headers and is terminated by an extra
 \\r\\n to indicate the end of the headers.
 
-http_header_names
+http.header_names
 -----------------
 
 Inspect a buffer only containing the names of the HTTP headers. Useful
@@ -477,37 +517,37 @@ Example buffer::
 
 Example rule::
 
-    alert http any any -> any any (http_header_names; content:"|0d 0a|Host|0d 0a|"; sid:1;)
+    alert http any any -> any any (http.header_names; content:"|0d 0a|Host|0d 0a|"; sid:1;)
 
 Example to make sure *only* Host is present::
 
-    alert http any any -> any any (http_header_names; \
+    alert http any any -> any any (http.header_names; \
             content:"|0d 0a|Host|0d 0a 0d 0a|"; sid:1;)
 
 Example to make sure *User-Agent* is directly after *Host*::
 
-    alert http any any -> any any (http_header_names; \
+    alert http any any -> any any (http.header_names; \
             content:"|0d 0a|Host|0d 0a|User-Agent|0d 0a|"; sid:1;)
 
 Example to make sure *User-Agent* is after *Host*, but not necessarily directly after::
 
-    alert http any any -> any any (http_header_names; \
+    alert http any any -> any any (http.header_names; \
             content:"|0d 0a|Host|0d 0a|"; content:"|0a 0d|User-Agent|0d 0a|"; \
             distance:-2; sid:1;)
 
-http_client_body
-----------------
+http.request_body
+-----------------
 
-With the ``http_client_body`` content modifier, it is possible to
+With the ``http.request_body`` content modifier, it is possible to
 match specifically and only on the HTTP request body. The keyword can
 be used in combination with all previously mentioned content modifiers
 like ``distance``, ``offset``, ``nocase``, ``within``, etc.
 
-Example of ``http_client_body`` in a HTTP request:
+Example of ``http.request_body`` in a HTTP request:
 
 .. image:: http-keywords/client_body.png
 
-Example of the purpose of ``http_client_body``:
+Example of the purpose of ``http.client_body``:
 
 .. image:: http-keywords/client_body1.png
 
@@ -516,52 +556,56 @@ in the :ref:`libhtp configuration section
 <suricata-yaml-configure-libhtp>` via the ``request-body-limit``
 setting.
 
-http_stat_code
+``http.request_body`` replaces the previous keyword name: ```http_client_body``. You may continue
++to use the previous name, but it's recommended that rules be converted to use
++the new name.
+
+http.stat_code
 --------------
 
-With the ``http_stat_code`` content modifier, it is possible to match
+With the ``http.stat_code`` content modifier, it is possible to match
 specifically and only on the HTTP status code buffer. The keyword can
 be used in combination with all previously mentioned content modifiers
 like ``distance``, ``offset``, ``nocase``, ``within``, etc.
 
-Example of ``http_stat_code`` in a HTTP response:
+Example of ``http.stat_code`` in a HTTP response:
 
 .. image:: http-keywords/stat_code.png
 
-Example of the purpose of ``http_stat_code``:
+Example of the purpose of ``http.stat_code``:
 
 .. image:: http-keywords/stat-code1.png
 
-http_stat_msg
+http.stat_msg
 -------------
 
-With the ``http_stat_msg`` content modifier, it is possible to match
+With the ``http.stat_msg`` content modifier, it is possible to match
 specifically and only on the HTTP status message buffer. The keyword
 can be used in combination with all previously mentioned content
 modifiers like ``depth``, ``distance``, ``offset``, ``nocase`` and
 ``within``.
 
-Example of ``http_stat_msg`` in a HTTP response:
+Example of ``http.stat_msg`` in a HTTP response:
 
 .. image:: http-keywords/stat_msg.png
 
-Example of the purpose of ``http_stat_msg``:
+Example of the purpose of ``http.stat_msg``:
 
 .. image:: http-keywords/stat_msg_1.png
 
-http_response_line
+http.response_line
 ------------------
 
-The ``http_response_line`` forces the whole HTTP response line to be inspected.
+The ``http.response_line`` forces the whole HTTP response line to be inspected.
 
 Example::
 
-    alert http any any -> any any (http_response_line; content:"HTTP/1.0 200 OK"; sid:1;)
+    alert http any any -> any any (http.response_line; content:"HTTP/1.0 200 OK"; sid:1;)
 
-http_server_body
-----------------
+http.response_body
+------------------
 
-With the ``http_server_body`` content modifier, it is possible to
+With the ``http.response_body`` content modifier, it is possible to
 match specifically and only on the HTTP response body. The keyword can
 be used in combination with all previously mentioned content modifiers
 like ``distance``, ``offset``, ``nocase``, ``within``, etc.
@@ -574,15 +618,15 @@ setting.
 Notes
 ~~~~~
 
--  Using ``http_server_body`` is similar to having content matches
+-  Using ``http.response_body`` is similar to having content matches
    that come after ``file_data`` except that it doesn't permanently
    (unless reset) set the detection pointer to the beginning of the
    server response body. i.e. it is not a sticky buffer.
 
--  ``http_server_body`` will match on gzip decoded data just like
+-  ``http.response_body`` will match on gzip decoded data just like
    ``file_data`` does.
 
--  Since ``http_server_body`` matches on a server response, it
+-  Since ``http.response_body`` matches on a server response, it
    can't be used with the ``to_server`` or ``from_client`` flow
    directives.
 
@@ -590,12 +634,39 @@ Notes
 
 -  further notes at the ``file_data`` section below.
 
-http_host and http_raw_host
+``http.response_body`` replaces the previous keyword name: ```http_server_body``. You may continue
++to use the previous name, but it's recommended that rules be converted to use
++the new name.
+
+http.server
+-----------
+
+Sticky buffer to match on the HTTP Server headers. Only contains the
+header value. The \\r\\n after the header are not part of the buffer.
+
+Example::
+
+    alert http any any -> any any (flow:to_client; \
+            http.server; content:"Microsoft-IIS/6.0"; sid:1;)
+
+http.location
+-------------
+
+Sticky buffer to match on the HTTP Location headers. Only contains the
+header value. The \\r\\n after the header are not part of the buffer.
+
+Example::
+
+    alert http any any -> any any (flow:to_client; \
+            http.location; content:"http://www.google.com"; sid:1;)
+
+
+http.host and http.host.raw
 ---------------------------
 
-With the ``http_host`` content modifier, it is possible to
+With the ``http.host`` content modifier, it is possible to
 match specifically and only the normalized hostname.
-The ``http_raw_host`` inspects the raw hostname.
+The ``http.host.raw`` inspects the raw hostname.
 
 The keyword can be used in combination with most of the content modifiers
 like ``distance``, ``offset``, ``within``, etc.
@@ -606,30 +677,34 @@ to specify a lowercase pattern.
 Notes
 ~~~~~
 
--  The ``http_host`` and ``http_raw_host`` buffers are populated
+-  ``http.host`` does not contain the port associated with
+   the host (i.e. abc.com:1234). To match on the host and port
+   or negate a host and port use ``http.host.raw``.
+
+-  The ``http.host`` and ``http.host.raw`` buffers are populated
    from either the URI (if the full URI is present in the request like
    in a proxy request) or the HTTP Host header. If both are present, the
    URI is used.
 
--  The ``http_host`` and ``http_raw_host`` buffers will NOT
+-  The ``http.host`` and ``http.host.raw`` buffers will NOT
    include the header name, colon, or leading whitespace if populated
    from the Host header.  i.e. they will not include "Host: ".
 
--  The ``http_host`` and ``http_raw_host`` buffers do not
+-  The ``http.host`` and ``http.host.raw`` buffers do not
    include a CRLF (0x0D 0x0A) at the end.  If you want to match the end
    of the buffer, use a relative 'isdataat' or a PCRE (although PCRE
    will be worse on performance).
 
--  The ``http_host`` buffer is normalized to be all lower case.
+-  The ``http.host`` buffer is normalized to be all lower case.
 
--  The content match that ``http_host`` applies to must be all lower
+-  The content match that ``http.host`` applies to must be all lower
    case or have the ``nocase`` flag set.
 
--  ``http_raw_host`` matches the unnormalized buffer so matching
+-  ``http.host.raw`` matches the unnormalized buffer so matching
    will be case-sensitive (unless ``nocase`` is set).
 
 -  If a request contains multiple "Host" headers, the values will be
-   concatenated in the ``http_host`` and ``http_raw_host``
+   concatenated in the ``http.host`` and ``http.host.raw``
    buffers, in the order seen from top to bottom, with a comma and space
    (", ") between each of them.
 
@@ -640,11 +715,11 @@ Notes
           Accept: */*
           Host: efg.net
 
-   ``http_host`` buffer contents::
+   ``http.host`` buffer contents::
 
           abc.com, efg.net
 
-   ``http_raw_host`` buffer contents::
+   ``http.host.raw`` buffer contents::
 
           ABC.com, efg.net
 
@@ -655,10 +730,7 @@ file_data
 ---------
 
 With ``file_data``, the HTTP response body is inspected, just like
-with ``http_server_body``. The ``file_data`` keyword works a bit
-differently from the normal content modifiers; when used in a rule,
-all content matches following it in the rule are affected (modified)
-by it.
+with ``http.response_body``. The ``file_data`` keyword is a sticky buffer.
 
 Example::
 

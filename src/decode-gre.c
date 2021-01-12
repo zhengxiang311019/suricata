@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -43,7 +43,7 @@
  * \brief Function to decode GRE packets
  */
 
-int DecodeGRE(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt, uint32_t len, PacketQueue *pq)
+int DecodeGRE(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, const uint8_t *pkt, uint32_t len)
 {
     uint32_t header_len = GRE_HDR_LEN;
     GRESreHdr *gsre = NULL;
@@ -66,7 +66,7 @@ int DecodeGRE(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt, ui
     {
         case GRE_VERSION_0:
 
-            /* GRE version 0 doenst support the fields below RFC 1701 */
+            /* GRE version 0 doesn't support the fields below RFC 1701 */
 
             /**
              * \todo We need to make sure this does not allow bypassing
@@ -130,7 +130,7 @@ int DecodeGRE(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt, ui
 
         case GRE_VERSION_1:
 
-            /* GRE version 1 doenst support the fields below RFC 1701 */
+            /* GRE version 1 doesn't support the fields below RFC 1701 */
 
             /**
              * \todo We need to make sure this does not allow bypassing
@@ -198,82 +198,77 @@ int DecodeGRE(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt, ui
     switch (GRE_GET_PROTO(p->greh))
     {
         case ETHERNET_TYPE_IP:
-            {
-                if (pq != NULL) {
-                    Packet *tp = PacketTunnelPktSetup(tv, dtv, p, pkt + header_len,
-                            len - header_len, DECODE_TUNNEL_IPV4, pq);
-                    if (tp != NULL) {
-                        PKT_SET_SRC(tp, PKT_SRC_DECODER_GRE);
-                        PacketEnqueue(pq,tp);
-                    }
-                }
-                break;
+        {
+            Packet *tp = PacketTunnelPktSetup(tv, dtv, p, pkt + header_len,
+                    len - header_len, DECODE_TUNNEL_IPV4);
+            if (tp != NULL) {
+                PKT_SET_SRC(tp, PKT_SRC_DECODER_GRE);
+                PacketEnqueueNoLock(&tv->decode_pq,tp);
             }
+            break;
+        }
 
         case GRE_PROTO_PPP:
-            {
-                if (pq != NULL) {
-                    Packet *tp = PacketTunnelPktSetup(tv, dtv, p, pkt + header_len,
-                            len - header_len, DECODE_TUNNEL_PPP, pq);
-                    if (tp != NULL) {
-                        PKT_SET_SRC(tp, PKT_SRC_DECODER_GRE);
-                        PacketEnqueue(pq,tp);
-                    }
-                }
-                break;
+        {
+            Packet *tp = PacketTunnelPktSetup(tv, dtv, p, pkt + header_len,
+                    len - header_len, DECODE_TUNNEL_PPP);
+            if (tp != NULL) {
+                PKT_SET_SRC(tp, PKT_SRC_DECODER_GRE);
+                PacketEnqueueNoLock(&tv->decode_pq,tp);
             }
+            break;
+        }
 
         case ETHERNET_TYPE_IPV6:
-            {
-                if (pq != NULL) {
-                    Packet *tp = PacketTunnelPktSetup(tv, dtv, p, pkt + header_len,
-                            len - header_len, DECODE_TUNNEL_IPV6, pq);
-                    if (tp != NULL) {
-                        PKT_SET_SRC(tp, PKT_SRC_DECODER_GRE);
-                        PacketEnqueue(pq,tp);
-                    }
-                }
-                break;
+        {
+            Packet *tp = PacketTunnelPktSetup(tv, dtv, p, pkt + header_len,
+                    len - header_len, DECODE_TUNNEL_IPV6);
+            if (tp != NULL) {
+                PKT_SET_SRC(tp, PKT_SRC_DECODER_GRE);
+                PacketEnqueueNoLock(&tv->decode_pq,tp);
             }
+            break;
+        }
 
         case ETHERNET_TYPE_VLAN:
-            {
-                if (pq != NULL) {
-                    Packet *tp = PacketTunnelPktSetup(tv, dtv, p, pkt + header_len,
-                            len - header_len, DECODE_TUNNEL_VLAN, pq);
-                    if (tp != NULL) {
-                        PKT_SET_SRC(tp, PKT_SRC_DECODER_GRE);
-                        PacketEnqueue(pq,tp);
-                    }
-                }
-                break;
+        {
+            Packet *tp = PacketTunnelPktSetup(tv, dtv, p, pkt + header_len,
+                    len - header_len, DECODE_TUNNEL_VLAN);
+            if (tp != NULL) {
+                PKT_SET_SRC(tp, PKT_SRC_DECODER_GRE);
+                PacketEnqueueNoLock(&tv->decode_pq,tp);
             }
+            break;
+        }
 
         case ETHERNET_TYPE_ERSPAN:
         {
-            if (pq != NULL) {
-                Packet *tp = PacketTunnelPktSetup(tv, dtv, p, pkt + header_len,
-                        len - header_len, DECODE_TUNNEL_ERSPAN, pq);
-                if (tp != NULL) {
-                    PKT_SET_SRC(tp, PKT_SRC_DECODER_GRE);
-                    PacketEnqueue(pq,tp);
-                }
+            // Determine if it's Type I or Type II based on the flags in the GRE header.
+            // Type I:  0|0|0|0|0|00000|000000000|00000
+            // Type II: 0|0|0|1|0|00000|000000000|00000
+            //                Seq
+            Packet *tp = PacketTunnelPktSetup(tv, dtv, p, pkt + header_len,
+                    len - header_len,
+                    GRE_FLAG_ISSET_SQ(p->greh) == 0 ?
+                            DECODE_TUNNEL_ERSPANI :
+                            DECODE_TUNNEL_ERSPANII);
+            if (tp != NULL) {
+                PKT_SET_SRC(tp, PKT_SRC_DECODER_GRE);
+                PacketEnqueueNoLock(&tv->decode_pq,tp);
             }
             break;
         }
 
         case ETHERNET_TYPE_BRIDGE:
-            {
-                if (pq != NULL) {
-                    Packet *tp = PacketTunnelPktSetup(tv, dtv, p, pkt + header_len,
-                            len - header_len, DECODE_TUNNEL_ETHERNET, pq);
-                    if (tp != NULL) {
-                        PKT_SET_SRC(tp, PKT_SRC_DECODER_GRE);
-                        PacketEnqueue(pq,tp);
-                    }
-                }
-                break;
+        {
+            Packet *tp = PacketTunnelPktSetup(tv, dtv, p, pkt + header_len,
+                    len - header_len, DECODE_TUNNEL_ETHERNET);
+            if (tp != NULL) {
+                PKT_SET_SRC(tp, PKT_SRC_DECODER_GRE);
+                PacketEnqueueNoLock(&tv->decode_pq,tp);
             }
+            break;
+        }
 
         default:
             return TM_ECODE_OK;
@@ -289,7 +284,6 @@ int DecodeGRE(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, uint8_t *pkt, ui
 
 static int DecodeGREtest01 (void)
 {
-
     uint8_t raw_gre[] = { 0x00 ,0x6e ,0x62 };
     Packet *p = PacketGetFromAlloc();
     if (unlikely(p == NULL))
@@ -300,7 +294,7 @@ static int DecodeGREtest01 (void)
     memset(&tv, 0, sizeof(ThreadVars));
     memset(&dtv, 0, sizeof(DecodeThreadVars));
 
-    DecodeGRE(&tv, &dtv, p, raw_gre, sizeof(raw_gre), NULL);
+    DecodeGRE(&tv, &dtv, p, raw_gre, sizeof(raw_gre));
 
     if(ENGINE_ISSET_EVENT(p,GRE_PKT_TOO_SMALL))  {
         SCFree(p);
@@ -341,7 +335,7 @@ static int DecodeGREtest02 (void)
     memset(&tv, 0, sizeof(ThreadVars));
     memset(&dtv, 0, sizeof(DecodeThreadVars));
 
-    DecodeGRE(&tv, &dtv, p, raw_gre, sizeof(raw_gre), NULL);
+    DecodeGRE(&tv, &dtv, p, raw_gre, sizeof(raw_gre));
 
     if(ENGINE_ISSET_EVENT(p,GRE_WRONG_VERSION))  {
         SCFree(p);
@@ -383,7 +377,7 @@ static int DecodeGREtest03 (void)
     memset(&tv, 0, sizeof(ThreadVars));
     memset(&dtv, 0, sizeof(DecodeThreadVars));
 
-    DecodeGRE(&tv, &dtv, p, raw_gre, sizeof(raw_gre), NULL);
+    DecodeGRE(&tv, &dtv, p, raw_gre, sizeof(raw_gre));
 
     if(p->greh == NULL) {
         SCFree(p);

@@ -1,4 +1,4 @@
-/* Copyright (C) 2017-2018 Open Information Security Foundation
+/* Copyright (C) 2017-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -17,19 +17,15 @@
 
 // written by Pierre Chifflier  <chifflier@wzdftpd.net>
 
-use ikev2::ipsec_parser::*;
-use ikev2::state::IKEV2ConnectionState;
-use core;
-use core::{AppProto,Flow,ALPROTO_UNKNOWN,ALPROTO_FAILED,STREAM_TOSERVER,STREAM_TOCLIENT};
-use applayer;
-use parser::*;
-use libc;
+use crate::ikev2::ipsec_parser::*;
+use crate::ikev2::state::IKEV2ConnectionState;
+use crate::core;
+use crate::core::{AppProto,Flow,ALPROTO_UNKNOWN,ALPROTO_FAILED,STREAM_TOSERVER,STREAM_TOCLIENT};
+use crate::applayer::{self, *};
 use std;
 use std::ffi::{CStr,CString};
 
-use log::*;
-
-use nom::IResult;
+use nom;
 
 #[repr(u32)]
 pub enum IKEV2Event {
@@ -43,6 +39,24 @@ pub enum IKEV2Event {
     WeakCryptoNoAuth,
     InvalidProposal,
     UnknownProposal,
+}
+
+impl IKEV2Event {
+    fn from_i32(value: i32) -> Option<IKEV2Event> {
+        match value {
+            0 => Some(IKEV2Event::MalformedData),
+            1 => Some(IKEV2Event::NoEncryption),
+            2 => Some(IKEV2Event::WeakCryptoEnc),
+            3 => Some(IKEV2Event::WeakCryptoPRF),
+            4 => Some(IKEV2Event::WeakCryptoDH),
+            5 => Some(IKEV2Event::WeakCryptoAuth),
+            6 => Some(IKEV2Event::WeakCryptoNoDH),
+            7 => Some(IKEV2Event::WeakCryptoNoAuth),
+            8 => Some(IKEV2Event::InvalidProposal),
+            9 => Some(IKEV2Event::UnknownProposal),
+            _ => None,
+        }
+    }
 }
 
 pub struct IKEV2State {
@@ -99,7 +113,7 @@ pub struct IKEV2Transaction {
     /// The events associated with this transaction
     events: *mut core::AppLayerDecoderEvents,
 
-    logged: applayer::LoggerFlags,
+    tx_data: applayer::AppLayerTxData,
 }
 
 
@@ -128,7 +142,7 @@ impl IKEV2State {
     /// Returns The number of messages parsed, or -1 on error
     fn parse(&mut self, i: &[u8], direction: u8) -> i32 {
         match parse_ikev2_header(i) {
-            IResult::Done(rem,ref hdr) => {
+            Ok((rem,ref hdr)) => {
                 if rem.len() == 0 && hdr.length == 28 {
                     return 1;
                 }
@@ -149,10 +163,14 @@ impl IKEV2State {
                 // use init_spi as transaction identifier
                 tx.xid = hdr.init_spi;
                 tx.hdr = (*hdr).clone();
+                self.transactions.push(tx);
+                let mut payload_types = Vec::new();
+                let mut errors = 0;
+                let mut notify_types = Vec::new();
                 match parse_ikev2_payload_list(rem,hdr.next_payload) {
-                    IResult::Done(_,Ok(ref p)) => {
+                    Ok((_,Ok(ref p))) => {
                         for payload in p {
-                            tx.payload_types.push(payload.hdr.next_payload_type);
+                            payload_types.push(payload.hdr.next_payload_type);
                             match payload.content {
                                 IkeV2PayloadContent::Dummy => (),
                                 IkeV2PayloadContent::SA(ref prop) => {
@@ -172,9 +190,9 @@ impl IKEV2State {
                                 IkeV2PayloadContent::Notify(ref n) => {
                                     SCLogDebug!("Notify: {:?}", n);
                                     if n.notify_type.is_error() {
-                                        tx.errors += 1;
+                                        errors += 1;
                                     }
-                                    tx.notify_types.push(n.notify_type);
+                                    notify_types.push(n.notify_type);
                                 },
                                 // XXX CertificateRequest
                                 // XXX Certificate
@@ -187,19 +205,24 @@ impl IKEV2State {
                                 },
                             }
                             self.connection_state = self.connection_state.advance(payload);
+                            if let Some(tx) = self.transactions.last_mut() {
+                                // borrow back tx to update it
+                                tx.payload_types.append(&mut payload_types);
+                                tx.errors = errors;
+                                tx.notify_types.append(&mut notify_types);
+                            }
                         };
                     },
                     e => { SCLogDebug!("parse_ikev2_payload_with_type: {:?}",e); () },
                 }
-                self.transactions.push(tx);
                 1
             },
-            IResult::Incomplete(_) => {
+            Err(nom::Err::Incomplete(_)) => {
                 SCLogDebug!("Insufficient data while parsing IKEV2 data");
                 self.set_event(IKEV2Event::MalformedData);
                 -1
             },
-            IResult::Error(_) => {
+            Err(_) => {
                 SCLogDebug!("Error while parsing IKEV2 data");
                 self.set_event(IKEV2Event::MalformedData);
                 -1
@@ -235,6 +258,8 @@ impl IKEV2State {
         if let Some(tx) = self.transactions.last_mut() {
             let ev = event as u8;
             core::sc_app_layer_decoder_events_set_event_raw(&mut tx.events, ev);
+        } else {
+            SCLogDebug!("IKEv2: trying to set event {} on non-existing transaction", event as u32);
         }
     }
 
@@ -398,7 +423,7 @@ impl IKEV2Transaction {
             id: id,
             de_state: None,
             events: std::ptr::null_mut(),
-            logged: applayer::LoggerFlags::new(),
+            tx_data: applayer::AppLayerTxData::new(),
         }
     }
 
@@ -418,14 +443,9 @@ impl Drop for IKEV2Transaction {
     }
 }
 
-
-
-
-
-
 /// Returns *mut IKEV2State
 #[no_mangle]
-pub extern "C" fn rs_ikev2_state_new() -> *mut libc::c_void {
+pub extern "C" fn rs_ikev2_state_new(_orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto) -> *mut std::os::raw::c_void {
     let state = IKEV2State::new();
     let boxed = Box::new(state);
     return unsafe{std::mem::transmute(boxed)};
@@ -434,7 +454,7 @@ pub extern "C" fn rs_ikev2_state_new() -> *mut libc::c_void {
 /// Params:
 /// - state: *mut IKEV2State as void pointer
 #[no_mangle]
-pub extern "C" fn rs_ikev2_state_free(state: *mut libc::c_void) {
+pub extern "C" fn rs_ikev2_state_free(state: *mut std::os::raw::c_void) {
     // Just unbox...
     let mut ikev2_state: Box<IKEV2State> = unsafe{std::mem::transmute(state)};
     ikev2_state.free();
@@ -442,25 +462,28 @@ pub extern "C" fn rs_ikev2_state_free(state: *mut libc::c_void) {
 
 #[no_mangle]
 pub extern "C" fn rs_ikev2_parse_request(_flow: *const core::Flow,
-                                       state: *mut libc::c_void,
-                                       _pstate: *mut libc::c_void,
-                                       input: *const libc::uint8_t,
+                                       state: *mut std::os::raw::c_void,
+                                       _pstate: *mut std::os::raw::c_void,
+                                       input: *const u8,
                                        input_len: u32,
-                                       _data: *const libc::c_void,
-                                       _flags: u8) -> i32 {
+                                       _data: *const std::os::raw::c_void,
+                                       _flags: u8) -> AppLayerResult {
     let buf = build_slice!(input,input_len as usize);
     let state = cast_pointer!(state,IKEV2State);
-    state.parse(buf, STREAM_TOSERVER)
+    if state.parse(buf, STREAM_TOSERVER) < 0 {
+        return AppLayerResult::err();
+    }
+    return AppLayerResult::ok();
 }
 
 #[no_mangle]
 pub extern "C" fn rs_ikev2_parse_response(_flow: *const core::Flow,
-                                       state: *mut libc::c_void,
-                                       pstate: *mut libc::c_void,
-                                       input: *const libc::uint8_t,
+                                       state: *mut std::os::raw::c_void,
+                                       pstate: *mut std::os::raw::c_void,
+                                       input: *const u8,
                                        input_len: u32,
-                                       _data: *const libc::c_void,
-                                       _flags: u8) -> i32 {
+                                       _data: *const std::os::raw::c_void,
+                                       _flags: u8) -> AppLayerResult {
     let buf = build_slice!(input,input_len as usize);
     let state = cast_pointer!(state,IKEV2State);
     let res = state.parse(buf, STREAM_TOCLIENT);
@@ -471,13 +494,16 @@ pub extern "C" fn rs_ikev2_parse_response(_flow: *const core::Flow,
                                        APP_LAYER_PARSER_BYPASS_READY)
         };
     }
-    res
+    if res < 0 {
+        return AppLayerResult::err();
+    }
+    return AppLayerResult::ok();
 }
 
 #[no_mangle]
-pub extern "C" fn rs_ikev2_state_get_tx(state: *mut libc::c_void,
-                                      tx_id: libc::uint64_t)
-                                      -> *mut libc::c_void
+pub extern "C" fn rs_ikev2_state_get_tx(state: *mut std::os::raw::c_void,
+                                      tx_id: u64)
+                                      -> *mut std::os::raw::c_void
 {
     let state = cast_pointer!(state,IKEV2State);
     match state.get_tx_by_id(tx_id) {
@@ -487,64 +513,33 @@ pub extern "C" fn rs_ikev2_state_get_tx(state: *mut libc::c_void,
 }
 
 #[no_mangle]
-pub extern "C" fn rs_ikev2_state_get_tx_count(state: *mut libc::c_void)
-                                            -> libc::uint64_t
+pub extern "C" fn rs_ikev2_state_get_tx_count(state: *mut std::os::raw::c_void)
+                                            -> u64
 {
     let state = cast_pointer!(state,IKEV2State);
     state.tx_id
 }
 
 #[no_mangle]
-pub extern "C" fn rs_ikev2_state_tx_free(state: *mut libc::c_void,
-                                       tx_id: libc::uint64_t)
+pub extern "C" fn rs_ikev2_state_tx_free(state: *mut std::os::raw::c_void,
+                                       tx_id: u64)
 {
     let state = cast_pointer!(state,IKEV2State);
     state.free_tx(tx_id);
 }
 
 #[no_mangle]
-pub extern "C" fn rs_ikev2_state_progress_completion_status(
-    _direction: libc::uint8_t)
-    -> libc::c_int
-{
-    return 1;
-}
-
-#[no_mangle]
-pub extern "C" fn rs_ikev2_tx_get_alstate_progress(_tx: *mut libc::c_void,
-                                                 _direction: libc::uint8_t)
-                                                 -> libc::c_int
+pub extern "C" fn rs_ikev2_tx_get_alstate_progress(_tx: *mut std::os::raw::c_void,
+                                                 _direction: u8)
+                                                 -> std::os::raw::c_int
 {
     1
 }
 
-
-
-
-
-#[no_mangle]
-pub extern "C" fn rs_ikev2_tx_set_logged(_state: *mut libc::c_void,
-                                       tx: *mut libc::c_void,
-                                       logged: libc::uint32_t)
-{
-    let tx = cast_pointer!(tx,IKEV2Transaction);
-    tx.logged.set(logged);
-}
-
-#[no_mangle]
-pub extern "C" fn rs_ikev2_tx_get_logged(_state: *mut libc::c_void,
-                                       tx: *mut libc::c_void)
-                                       -> u32
-{
-    let tx = cast_pointer!(tx,IKEV2Transaction);
-    return tx.logged.get();
-}
-
-
 #[no_mangle]
 pub extern "C" fn rs_ikev2_state_set_tx_detect_state(
-    tx: *mut libc::c_void,
-    de_state: &mut core::DetectEngineState) -> libc::c_int
+    tx: *mut std::os::raw::c_void,
+    de_state: &mut core::DetectEngineState) -> std::os::raw::c_int
 {
     let tx = cast_pointer!(tx,IKEV2Transaction);
     tx.de_state = Some(de_state);
@@ -553,7 +548,7 @@ pub extern "C" fn rs_ikev2_state_set_tx_detect_state(
 
 #[no_mangle]
 pub extern "C" fn rs_ikev2_state_get_tx_detect_state(
-    tx: *mut libc::c_void)
+    tx: *mut std::os::raw::c_void)
     -> *mut core::DetectEngineState
 {
     let tx = cast_pointer!(tx,IKEV2Transaction);
@@ -565,22 +560,47 @@ pub extern "C" fn rs_ikev2_state_get_tx_detect_state(
 
 
 #[no_mangle]
-pub extern "C" fn rs_ikev2_state_get_events(state: *mut libc::c_void,
-                                          tx_id: libc::uint64_t)
+pub extern "C" fn rs_ikev2_state_get_events(tx: *mut std::os::raw::c_void)
                                           -> *mut core::AppLayerDecoderEvents
 {
-    let state = cast_pointer!(state,IKEV2State);
-    match state.get_tx_by_id(tx_id) {
-        Some(tx) => tx.events,
-        _        => std::ptr::null_mut(),
+    let tx = cast_pointer!(tx, IKEV2Transaction);
+    return tx.events;
+}
+
+#[no_mangle]
+pub extern "C" fn rs_ikev2_state_get_event_info_by_id(event_id: std::os::raw::c_int,
+                                                      event_name: *mut *const std::os::raw::c_char,
+                                                      event_type: *mut core::AppLayerEventType)
+                                                      -> i8
+{
+    if let Some(e) = IKEV2Event::from_i32(event_id as i32) {
+        let estr = match e {
+            IKEV2Event::MalformedData    => { "malformed_data\0" },
+            IKEV2Event::NoEncryption     => { "no_encryption\0" },
+            IKEV2Event::WeakCryptoEnc    => { "weak_crypto_enc\0" },
+            IKEV2Event::WeakCryptoPRF    => { "weak_crypto_prf\0" },
+            IKEV2Event::WeakCryptoDH     => { "weak_crypto_dh\0" },
+            IKEV2Event::WeakCryptoAuth   => { "weak_crypto_auth\0" },
+            IKEV2Event::WeakCryptoNoDH   => { "weak_crypto_nodh\0" },
+            IKEV2Event::WeakCryptoNoAuth => { "weak_crypto_noauth\0" },
+            IKEV2Event::InvalidProposal  => { "invalid_proposal\0" },
+            IKEV2Event::UnknownProposal  => { "unknown_proposal\0" },
+        };
+        unsafe{
+            *event_name = estr.as_ptr() as *const std::os::raw::c_char;
+            *event_type = core::APP_LAYER_EVENT_TYPE_TRANSACTION;
+        };
+        0
+    } else {
+        -1
     }
 }
 
 #[no_mangle]
-pub extern "C" fn rs_ikev2_state_get_event_info(event_name: *const libc::c_char,
-                                              event_id: *mut libc::c_int,
+pub extern "C" fn rs_ikev2_state_get_event_info(event_name: *const std::os::raw::c_char,
+                                              event_id: *mut std::os::raw::c_int,
                                               event_type: *mut core::AppLayerEventType)
-                                              -> libc::c_int
+                                              -> std::os::raw::c_int
 {
     if event_name == std::ptr::null() { return -1; }
     let c_event_name: &CStr = unsafe { CStr::from_ptr(event_name) };
@@ -604,7 +624,7 @@ pub extern "C" fn rs_ikev2_state_get_event_info(event_name: *const libc::c_char,
     };
     unsafe{
         *event_type = core::APP_LAYER_EVENT_TYPE_TRANSACTION;
-        *event_id = event as libc::c_int;
+        *event_id = event as std::os::raw::c_int;
     };
     0
 }
@@ -613,11 +633,15 @@ pub extern "C" fn rs_ikev2_state_get_event_info(event_name: *const libc::c_char,
 static mut ALPROTO_IKEV2 : AppProto = ALPROTO_UNKNOWN;
 
 #[no_mangle]
-pub extern "C" fn rs_ikev2_probing_parser(_flow: *const Flow, input:*const libc::uint8_t, input_len: u32) -> AppProto {
+pub extern "C" fn rs_ikev2_probing_parser(_flow: *const Flow,
+        _direction: u8,
+        input:*const u8, input_len: u32,
+        _rdir: *mut u8) -> AppProto
+{
     let slice = build_slice!(input,input_len as usize);
     let alproto = unsafe{ ALPROTO_IKEV2 };
     match parse_ikev2_header(slice) {
-        IResult::Done(_, ref hdr) => {
+        Ok((_, ref hdr)) => {
             if hdr.maj_ver != 2 || hdr.min_ver != 0 {
                 SCLogDebug!("ipsec_probe: could be ipsec, but with unsupported/invalid version {}.{}",
                         hdr.maj_ver, hdr.min_ver);
@@ -634,14 +658,16 @@ pub extern "C" fn rs_ikev2_probing_parser(_flow: *const Flow, input:*const libc:
             }
             return alproto;
         },
-        IResult::Incomplete(_) => {
+        Err(nom::Err::Incomplete(_)) => {
             return ALPROTO_UNKNOWN;
         },
-        IResult::Error(_) => {
+        Err(_) => {
             return unsafe{ALPROTO_FAILED};
         },
     }
 }
+
+export_tx_data_get!(rs_ikev2_get_tx_data, IKEV2Transaction);
 
 const PARSER_NAME : &'static [u8] = b"ikev2\0";
 
@@ -649,34 +675,36 @@ const PARSER_NAME : &'static [u8] = b"ikev2\0";
 pub unsafe extern "C" fn rs_register_ikev2_parser() {
     let default_port = CString::new("500").unwrap();
     let parser = RustParser {
-        name              : PARSER_NAME.as_ptr() as *const libc::c_char,
-        default_port      : default_port.as_ptr(),
-        ipproto           : libc::IPPROTO_UDP,
-        probe_ts          : rs_ikev2_probing_parser,
-        probe_tc          : rs_ikev2_probing_parser,
-        min_depth         : 0,
-        max_depth         : 16,
-        state_new         : rs_ikev2_state_new,
-        state_free        : rs_ikev2_state_free,
-        tx_free           : rs_ikev2_state_tx_free,
-        parse_ts          : rs_ikev2_parse_request,
-        parse_tc          : rs_ikev2_parse_response,
-        get_tx_count      : rs_ikev2_state_get_tx_count,
-        get_tx            : rs_ikev2_state_get_tx,
-        tx_get_comp_st    : rs_ikev2_state_progress_completion_status,
-        tx_get_progress   : rs_ikev2_tx_get_alstate_progress,
-        get_tx_logged     : Some(rs_ikev2_tx_get_logged),
-        set_tx_logged     : Some(rs_ikev2_tx_set_logged),
-        get_de_state      : rs_ikev2_state_get_tx_detect_state,
-        set_de_state      : rs_ikev2_state_set_tx_detect_state,
-        get_events        : Some(rs_ikev2_state_get_events),
-        get_eventinfo     : Some(rs_ikev2_state_get_event_info),
-        localstorage_new  : None,
-        localstorage_free : None,
-        get_tx_mpm_id     : None,
-        set_tx_mpm_id     : None,
-        get_files         : None,
-        get_tx_iterator   : None,
+        name               : PARSER_NAME.as_ptr() as *const std::os::raw::c_char,
+        default_port       : default_port.as_ptr(),
+        ipproto            : core::IPPROTO_UDP,
+        probe_ts           : Some(rs_ikev2_probing_parser),
+        probe_tc           : Some(rs_ikev2_probing_parser),
+        min_depth          : 0,
+        max_depth          : 16,
+        state_new          : rs_ikev2_state_new,
+        state_free         : rs_ikev2_state_free,
+        tx_free            : rs_ikev2_state_tx_free,
+        parse_ts           : rs_ikev2_parse_request,
+        parse_tc           : rs_ikev2_parse_response,
+        get_tx_count       : rs_ikev2_state_get_tx_count,
+        get_tx             : rs_ikev2_state_get_tx,
+        tx_comp_st_ts      : 1,
+        tx_comp_st_tc      : 1,
+        tx_get_progress    : rs_ikev2_tx_get_alstate_progress,
+        get_de_state       : rs_ikev2_state_get_tx_detect_state,
+        set_de_state       : rs_ikev2_state_set_tx_detect_state,
+        get_events         : Some(rs_ikev2_state_get_events),
+        get_eventinfo      : Some(rs_ikev2_state_get_event_info),
+        get_eventinfo_byid : Some(rs_ikev2_state_get_event_info_by_id),
+        localstorage_new   : None,
+        localstorage_free  : None,
+        get_files          : None,
+        get_tx_iterator    : None,
+        get_tx_data        : rs_ikev2_get_tx_data,
+        apply_tx_config    : None,
+        flags              : APP_LAYER_PARSER_OPT_UNIDIR_TXS,
+        truncate           : None,
     };
 
     let ip_proto_str = CString::new("udp").unwrap();
@@ -688,7 +716,7 @@ pub unsafe extern "C" fn rs_register_ikev2_parser() {
             let _ = AppLayerRegisterParser(&parser, alproto);
         }
     } else {
-        SCLogDebug!("Protocol detecter and parser disabled for IKEV2.");
+        SCLogDebug!("Protocol detector and parser disabled for IKEV2.");
     }
 }
 

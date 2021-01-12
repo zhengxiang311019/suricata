@@ -32,12 +32,6 @@
 
 #include "detect-filestore.h"
 
-#include "detect-engine-uri.h"
-#include "detect-engine-hcbd.h"
-#include "detect-engine-hrhd.h"
-#include "detect-engine-hmd.h"
-#include "detect-engine-hcd.h"
-#include "detect-engine-hrud.h"
 #include "detect-engine-dcepayload.h"
 #include "detect-engine-file.h"
 
@@ -48,7 +42,6 @@
 #include "app-layer-parser.h"
 #include "app-layer-protos.h"
 #include "app-layer-htp.h"
-#include "app-layer-smb.h"
 #include "app-layer-dcerpc-common.h"
 #include "app-layer-dcerpc.h"
 #include "app-layer-smtp.h"
@@ -56,6 +49,7 @@
 #include "util-unittest.h"
 #include "util-unittest-helper.h"
 #include "util-profiling.h"
+#include "util-validate.h"
 
 
 /**
@@ -71,9 +65,8 @@
  *  \retval 2 can't match
  *  \retval 3 can't match filestore signature
  */
-static int DetectFileInspect(ThreadVars *tv, DetectEngineThreadCtx *det_ctx,
-        Flow *f, const Signature *s, const SigMatchData *smd,
-        uint8_t flags, FileContainer *ffc)
+static int DetectFileInspect(DetectEngineThreadCtx *det_ctx, Flow *f, const Signature *s,
+        const SigMatchData *smd, uint8_t flags, FileContainer *ffc)
 {
     int r = 0;
     int match = 0;
@@ -151,10 +144,10 @@ static int DetectFileInspect(ThreadVars *tv, DetectEngineThreadCtx *det_ctx,
                 if (sigmatch_table[smd->type].FileMatch != NULL) {
                     KEYWORD_PROFILING_START;
                     match = sigmatch_table[smd->type].
-                        FileMatch(tv, det_ctx, f, flags, file, s, smd->ctx);
+                        FileMatch(det_ctx, f, flags, file, s, smd->ctx);
                     KEYWORD_PROFILING_END(det_ctx, smd->type, (match > 0));
                     if (match == 0) {
-                        r = DETECT_ENGINE_INSPECT_SIG_CANT_MATCH;
+                        r = DETECT_ENGINE_INSPECT_SIG_CANT_MATCH_FILES;
                         break;
                     } else if (smd->is_last) {
                         r = DETECT_ENGINE_INSPECT_SIG_MATCH;
@@ -172,11 +165,6 @@ static int DetectFileInspect(ThreadVars *tv, DetectEngineThreadCtx *det_ctx,
             if (r == DETECT_ENGINE_INSPECT_SIG_MATCH)
                 store_r = DETECT_ENGINE_INSPECT_SIG_MATCH;
 
-            /* if this is a filestore sig, and the sig can't match
-             * return 3 so we can distinguish */
-            if ((s->flags & SIG_FLAG_FILESTORE) && r == DETECT_ENGINE_INSPECT_SIG_CANT_MATCH)
-                r = DETECT_ENGINE_INSPECT_SIG_CANT_MATCH_FILESTORE;
-
             /* continue, this file may (or may not) be unable to match
              * maybe we have more that can :) */
         }
@@ -190,7 +178,7 @@ static int DetectFileInspect(ThreadVars *tv, DetectEngineThreadCtx *det_ctx,
             if (fd->scope > FILESTORE_SCOPE_DEFAULT) {
                 KEYWORD_PROFILING_START;
                 match = sigmatch_table[smd->type].
-                    FileMatch(tv, det_ctx, f, flags, /* no file */NULL, s, smd->ctx);
+                    FileMatch(det_ctx, f, flags, /* no file */NULL, s, smd->ctx);
                 KEYWORD_PROFILING_END(det_ctx, smd->type, (match > 0));
 
                 if (match == 1) {
@@ -213,7 +201,6 @@ static int DetectFileInspect(ThreadVars *tv, DetectEngineThreadCtx *det_ctx,
 /**
  *  \brief Inspect the file inspecting keywords against the state
  *
- *  \param tv thread vars
  *  \param det_ctx detection engine thread ctx
  *  \param f flow
  *  \param s signature to inspect
@@ -227,33 +214,29 @@ static int DetectFileInspect(ThreadVars *tv, DetectEngineThreadCtx *det_ctx,
  *
  *  \note flow is not locked at this time
  */
-int DetectFileInspectGeneric(ThreadVars *tv,
-        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const Signature *s, const SigMatchData *smd,
-        Flow *f, uint8_t flags, void *alstate, void *tx, uint64_t tx_id)
+int DetectFileInspectGeneric(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
+        const struct DetectEngineAppInspectionEngine_ *engine, const Signature *s, Flow *f,
+        uint8_t flags, void *_alstate, void *tx, uint64_t tx_id)
 {
     SCEnter();
-
-    if (alstate == NULL) {
-        SCReturnInt(DETECT_ENGINE_INSPECT_SIG_NO_MATCH);
-    }
+    DEBUG_VALIDATE_BUG_ON(f->alstate != _alstate);
 
     const uint8_t direction = flags & (STREAM_TOSERVER|STREAM_TOCLIENT);
-    FileContainer *ffc = AppLayerParserGetFiles(f->proto, f->alproto, alstate, direction);
+    FileContainer *ffc = AppLayerParserGetFiles(f, direction);
     if (ffc == NULL || ffc->head == NULL) {
         SCReturnInt(DETECT_ENGINE_INSPECT_SIG_NO_MATCH);
     }
 
     int r = DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
-    int match = DetectFileInspect(tv, det_ctx, f, s, smd, flags, ffc);
+    int match = DetectFileInspect(det_ctx, f, s, engine->smd, flags, ffc);
     if (match == DETECT_ENGINE_INSPECT_SIG_MATCH) {
         r = DETECT_ENGINE_INSPECT_SIG_MATCH;
     } else if (match == DETECT_ENGINE_INSPECT_SIG_CANT_MATCH) {
         SCLogDebug("sid %u can't match on this transaction", s->id);
         r = DETECT_ENGINE_INSPECT_SIG_CANT_MATCH;
-    } else if (match == DETECT_ENGINE_INSPECT_SIG_CANT_MATCH_FILESTORE) {
-        SCLogDebug("sid %u can't match on this transaction (filestore sig)", s->id);
-        r = DETECT_ENGINE_INSPECT_SIG_CANT_MATCH_FILESTORE;
+    } else if (match == DETECT_ENGINE_INSPECT_SIG_CANT_MATCH_FILES) {
+        SCLogDebug("sid %u can't match on this transaction (file sig)", s->id);
+        r = DETECT_ENGINE_INSPECT_SIG_CANT_MATCH_FILES;
     } else if (match == DETECT_ENGINE_INSPECT_SIG_MATCH_MORE_FILES) {
         SCLogDebug("match with more files ahead");
         r = match;

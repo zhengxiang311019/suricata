@@ -17,11 +17,15 @@
 
 //! Nom parsers for DNS.
 
-use nom::{be_u8, be_u16, be_u32};
+use nom::IResult;
+use nom::combinator::rest;
+use nom::error::ErrorKind;
+use nom::multi::length_data;
+use nom::number::streaming::{be_u8, be_u16, be_u32};
 use nom;
-use dns::dns::*;
+use crate::dns::dns::*;
 
-/// Parse a DNS header.
+// Parse a DNS header.
 named!(pub dns_parse_header<DNSHeader>,
        do_parse!(
            tx_id: be_u16 >>
@@ -50,7 +54,7 @@ named!(pub dns_parse_header<DNSHeader>,
 ///   message: the complete message that start is a part of
 pub fn dns_parse_name<'a, 'b>(start: &'b [u8],
                               message: &'b [u8])
-                              -> nom::IResult<&'b [u8], Vec<u8>> {
+                              -> IResult<&'b [u8], Vec<u8>> {
     let mut pos = start;
     let mut pivot = start;
     let mut name: Vec<u8> = Vec::with_capacity(32);
@@ -67,8 +71,8 @@ pub fn dns_parse_name<'a, 'b>(start: &'b [u8],
             pos = &pos[1..];
             break;
         } else if len & 0b1100_0000 == 0 {
-            match length_bytes!(pos, be_u8) {
-                nom::IResult::Done(rem, label) => {
+            match length_data(be_u8)(pos) as IResult<&[u8],_> {
+                Ok((rem, label)) => {
                     if name.len() > 0 {
                         name.push('.' as u8);
                     }
@@ -76,38 +80,38 @@ pub fn dns_parse_name<'a, 'b>(start: &'b [u8],
                     pos = rem;
                 }
                 _ => {
-                    return nom::IResult::Error(
-                        error_position!(nom::ErrorKind::OctDigit, pos));
+                    return Err(nom::Err::Error(
+                        error_position!(pos, ErrorKind::OctDigit)));
                 }
             }
         } else if len & 0b1100_0000 == 0b1100_0000 {
-            match be_u16(pos) {
-                nom::IResult::Done(rem, leader) => {
-                    let offset = leader & 0x3fff;
-                    if offset as usize > message.len() {
-                        return nom::IResult::Error(
-                            error_position!(nom::ErrorKind::OctDigit, pos));
+            match be_u16(pos) as IResult<&[u8],_> {
+                Ok((rem, leader)) => {
+                    let offset = usize::from(leader) & 0x3fff;
+                    if offset > message.len() {
+                        return Err(nom::Err::Error(
+                            error_position!(pos, ErrorKind::OctDigit)));
                     }
-                    pos = &message[offset as usize..];
+                    pos = &message[offset..];
                     if pivot == start {
                         pivot = rem;
                     }
                 }
                 _ => {
-                    return nom::IResult::Error(
-                        error_position!(nom::ErrorKind::OctDigit, pos));
+                    return Err(nom::Err::Error(
+                        error_position!(pos, ErrorKind::OctDigit)));
                 }
             }
         } else {
-            return nom::IResult::Error(
-                error_position!(nom::ErrorKind::OctDigit, pos));
+            return Err(nom::Err::Error(
+                error_position!(pos, ErrorKind::OctDigit)));
         }
 
         // Return error if we've looped a certain number of times.
         count += 1;
         if count > 255 {
-            return nom::IResult::Error(
-                error_position!(nom::ErrorKind::OctDigit, pos));
+            return Err(nom::Err::Error(
+                error_position!(pos, ErrorKind::OctDigit)));
         }
 
     }
@@ -117,9 +121,9 @@ pub fn dns_parse_name<'a, 'b>(start: &'b [u8],
     // diverged from each other?  A straight up comparison would
     // actually check the contents.
     if pivot.len() != start.len() {
-        return nom::IResult::Done(pivot, name);
+        return Ok((pivot, name));
     }
-    return nom::IResult::Done(pos, name);
+    return Ok((pos, name));
 
 }
 
@@ -134,14 +138,15 @@ pub fn dns_parse_name<'a, 'b>(start: &'b [u8],
 /// multi-string TXT entry as a single quote string, similar to the
 /// output of dig. Something to consider for a future version.
 fn dns_parse_answer<'a>(slice: &'a [u8], message: &'a [u8], count: usize)
-                        -> nom::IResult<&'a [u8], Vec<DNSAnswerEntry>> {
+                        -> IResult<&'a [u8], Vec<DNSAnswerEntry>> {
 
     let mut answers = Vec::new();
     let mut input = slice;
 
     for _ in 0..count {
-        match closure!(&'a [u8], do_parse!(
-            name: apply!(dns_parse_name, message) >>
+        match do_parse!(
+            input,
+            name: call!(dns_parse_name, message) >>
                 rrtype: be_u16 >>
                 rrclass: be_u16 >>
                 ttl: be_u32 >>
@@ -154,8 +159,8 @@ fn dns_parse_answer<'a>(slice: &'a [u8], message: &'a [u8], count: usize)
                     ttl,
                     data
                 )
-        ))(input) {
-            nom::IResult::Done(rem, val) => {
+        ) {
+            Ok((rem, val)) => {
                 let name = val.0;
                 let rrtype = val.1;
                 let rrclass = val.2;
@@ -176,14 +181,15 @@ fn dns_parse_answer<'a>(slice: &'a [u8], message: &'a [u8], count: usize)
                         1
                     }
                 };
-                let result: nom::IResult<&'a [u8], Vec<Vec<u8>>> =
-                    closure!(&'a [u8], do_parse!(
+                let result: IResult<&'a [u8], Vec<DNSRData>> =
+                    do_parse!(
+                        data,
                         rdata: many_m_n!(1, n,
-                                         apply!(dns_parse_rdata, message, rrtype))
+                                         complete!(call!(dns_parse_rdata, message, rrtype)))
                             >> (rdata)
-                    ))(data);
+                    );
                 match result {
-                    nom::IResult::Done(_, rdatas) => {
+                    Ok((_, rdatas)) => {
                         for rdata in rdatas {
                             answers.push(DNSAnswerEntry{
                                 name: name.clone(),
@@ -194,38 +200,29 @@ fn dns_parse_answer<'a>(slice: &'a [u8], message: &'a [u8], count: usize)
                             });
                         }
                     }
-                    nom::IResult::Error(err) => {
-                        return nom::IResult::Error(err);
-                    }
-                    nom::IResult::Incomplete(needed) => {
-                        return nom::IResult::Incomplete(needed);
-                    }
+                    Err(e) => { return Err(e); }
                 }
                 input = rem;
             }
-            nom::IResult::Error(err) => {
-                return nom::IResult::Error(err);
-            }
-            nom::IResult::Incomplete(needed) => {
-                return nom::IResult::Incomplete(needed);
-            }
+            Err(e) => { return Err(e); }
         }
     }
 
-    return nom::IResult::Done(input, answers);
+    return Ok((input, answers));
 }
 
 
 /// Parse a DNS response.
 pub fn dns_parse_response<'a>(slice: &'a [u8])
-                              -> nom::IResult<&[u8], DNSResponse> {
-    let response = closure!(&'a [u8], do_parse!(
+                              -> IResult<&[u8], DNSResponse> {
+    do_parse!(
+        slice,
         header: dns_parse_header
             >> queries: count!(
-                apply!(dns_parse_query, slice), header.questions as usize)
-            >> answers: apply!(
+                call!(dns_parse_query, slice), header.questions as usize)
+            >> answers: call!(
                 dns_parse_answer, slice, header.answer_rr as usize)
-            >> authorities: apply!(
+            >> authorities: call!(
                 dns_parse_answer, slice, header.authority_rr as usize)
             >> (
                 DNSResponse{
@@ -235,21 +232,20 @@ pub fn dns_parse_response<'a>(slice: &'a [u8])
                     authorities: authorities,
                 }
             )
-    ))(slice);
-
-    return response;
+    )
 }
 
 /// Parse a single DNS query.
 ///
-/// Arguments are suitable for using with apply!:
+/// Arguments are suitable for using with call!:
 ///
-///    apply!(complete_dns_message_buffer)
+///    call!(complete_dns_message_buffer)
 pub fn dns_parse_query<'a>(input: &'a [u8],
                            message: &'a [u8])
-                           -> nom::IResult<&'a [u8], DNSQueryEntry> {
-    return closure!(&'a [u8], do_parse!(
-        name: apply!(dns_parse_name, message) >>
+                           -> IResult<&'a [u8], DNSQueryEntry> {
+    do_parse!(
+        input,
+        name: call!(dns_parse_name, message) >>
         rrtype: be_u16 >>
         rrclass: be_u16 >>
             (
@@ -259,48 +255,147 @@ pub fn dns_parse_query<'a>(input: &'a [u8],
                     rrclass: rrclass,
                 }
             )
-    ))(input);
+    )
+}
+
+fn dns_parse_rdata_a<'a>(input: &'a [u8]) -> IResult<&'a [u8], DNSRData> {
+    rest(input).map(|(input, data)| (input, DNSRData::A(data.to_vec())))
+}
+
+fn dns_parse_rdata_aaaa<'a>(input: &'a [u8]) -> IResult<&'a [u8], DNSRData> {
+    rest(input).map(|(input, data)| (input, DNSRData::AAAA(data.to_vec())))
+}
+
+fn dns_parse_rdata_cname<'a>(input: &'a [u8], message: &'a [u8])
+                             -> IResult<&'a [u8], DNSRData> {
+    dns_parse_name(input, message).map(|(input, name)|
+            (input, DNSRData::CNAME(name)))
+}
+
+fn dns_parse_rdata_ns<'a>(input: &'a [u8], message: &'a [u8])
+                             -> IResult<&'a [u8], DNSRData> {
+    dns_parse_name(input, message).map(|(input, name)|
+            (input, DNSRData::NS(name)))
+}
+
+fn dns_parse_rdata_ptr<'a>(input: &'a [u8], message: &'a [u8])
+                           -> IResult<&'a [u8], DNSRData> {
+    dns_parse_name(input, message).map(|(input, name)|
+            (input, DNSRData::PTR(name)))
+}
+
+fn dns_parse_rdata_soa<'a>(input: &'a [u8], message: &'a [u8])
+                           -> IResult<&'a [u8], DNSRData> {
+    do_parse!(
+        input,
+        mname: call!(dns_parse_name, message) >>
+        rname: call!(dns_parse_name, message) >>
+        serial: be_u32 >>
+        refresh: be_u32 >>
+        retry: be_u32 >>
+        expire: be_u32 >>
+        minimum: be_u32 >>
+            (DNSRData::SOA(DNSRDataSOA{
+                mname,
+                rname,
+                serial,
+                refresh,
+                retry,
+                expire,
+                minimum,
+            }))
+    )
+}
+
+fn dns_parse_rdata_mx<'a>(input: &'a [u8], message: &'a [u8])
+                          -> IResult<&'a [u8], DNSRData> {
+    // For MX we skip over the preference field before
+    // parsing out the name.
+    do_parse!(
+        input,
+        be_u16 >>
+        name: call!(dns_parse_name, message) >>
+            (DNSRData::MX(name))
+    )
+}
+
+fn dns_parse_rdata_srv<'a>(input: &'a [u8], message: &'a [u8])
+                             -> IResult<&'a [u8], DNSRData> {
+    do_parse!(
+        input,
+        priority: be_u16 >>
+        weight: be_u16 >>
+        port: be_u16 >>
+        target: call!(dns_parse_name, message) >>
+            (DNSRData::SRV(DNSRDataSRV{
+                priority,
+                weight,
+                port,
+                target,
+            }))
+    )
+}
+
+fn dns_parse_rdata_txt<'a>(input: &'a [u8])
+                           -> IResult<&'a [u8], DNSRData> {
+    do_parse!(
+        input,
+        len: be_u8 >>
+        txt: take!(len) >>
+            (DNSRData::TXT(txt.to_vec()))
+    )
+}
+
+
+fn dns_parse_rdata_null<'a>(input: &'a [u8]) -> IResult<&'a [u8], DNSRData> {
+    rest(input).map(|(input, data)| (input, DNSRData::NULL(data.to_vec())))
+}
+
+fn dns_parse_rdata_sshfp<'a>(input: &'a [u8])
+                             -> IResult<&'a [u8], DNSRData> {
+    do_parse!(
+        input,
+        algo: be_u8 >>
+        fp_type: be_u8 >>
+        fingerprint: call!(rest) >>
+            (DNSRData::SSHFP(DNSRDataSSHFP{
+                algo,
+                fp_type,
+                fingerprint: fingerprint.to_vec()
+            }))
+    )
+}
+
+fn dns_parse_rdata_unknown<'a>(input: &'a [u8])
+                               -> IResult<&'a [u8], DNSRData> {
+    rest(input).map(|(input, data)| (input, DNSRData::Unknown(data.to_vec())))
 }
 
 pub fn dns_parse_rdata<'a>(input: &'a [u8], message: &'a [u8], rrtype: u16)
-    -> nom::IResult<&'a [u8], Vec<u8>>
+    -> IResult<&'a [u8], DNSRData>
 {
     match rrtype {
-        DNS_RECORD_TYPE_CNAME |
-        DNS_RECORD_TYPE_PTR |
-        DNS_RECORD_TYPE_SOA => {
-            dns_parse_name(input, message)
-        },
-        DNS_RECORD_TYPE_MX => {
-            // For MX we we skip over the preference field before
-            // parsing out the name.
-            closure!(&'a [u8], do_parse!(
-                be_u16 >>
-                name: apply!(dns_parse_name, message) >>
-                    (name)
-            ))(input)
-        },
-        DNS_RECORD_TYPE_TXT => {
-            closure!(&'a [u8], do_parse!(
-                len: be_u8 >>
-                txt: take!(len) >>
-                    (txt.to_vec())
-            ))(input)
-        },
-        _ => {
-            closure!(&'a [u8], do_parse!(
-                data: take!(input.len()) >>
-                    (data.to_vec())
-            ))(input)
-        }
+        DNS_RECORD_TYPE_A => dns_parse_rdata_a(input),
+        DNS_RECORD_TYPE_AAAA => dns_parse_rdata_aaaa(input),
+        DNS_RECORD_TYPE_CNAME => dns_parse_rdata_cname(input, message),
+        DNS_RECORD_TYPE_PTR => dns_parse_rdata_ptr(input, message),
+        DNS_RECORD_TYPE_SOA => dns_parse_rdata_soa(input, message),
+        DNS_RECORD_TYPE_MX => dns_parse_rdata_mx(input, message),
+        DNS_RECORD_TYPE_NS => dns_parse_rdata_ns(input, message),
+        DNS_RECORD_TYPE_TXT => dns_parse_rdata_txt(input),
+        DNS_RECORD_TYPE_NULL => dns_parse_rdata_null(input),
+        DNS_RECORD_TYPE_SSHFP => dns_parse_rdata_sshfp(input),
+        DNS_RECORD_TYPE_SRV => dns_parse_rdata_srv(input, message),
+        _ => dns_parse_rdata_unknown(input),
     }
 }
 
 /// Parse a DNS request.
-pub fn dns_parse_request<'a>(input: &'a [u8]) -> nom::IResult<&[u8], DNSRequest> {
-    return closure!(&'a [u8], do_parse!(
+pub fn dns_parse_request<'a>(input: &'a [u8]) -> IResult<&[u8], DNSRequest> {
+    do_parse!(
+        input,
         header: dns_parse_header >>
-        queries: count!(apply!(dns_parse_query, input),
+        queries: count!(call!(dns_parse_query, input),
                         header.questions as usize) >>
             (
                 DNSRequest{
@@ -308,15 +403,14 @@ pub fn dns_parse_request<'a>(input: &'a [u8]) -> nom::IResult<&[u8], DNSRequest>
                     queries: queries,
                 }
             )
-    ))(input);
+    )
 }
 
 #[cfg(test)]
 mod tests {
 
-    use dns::dns::{DNSHeader,DNSAnswerEntry};
-    use dns::parser::*;
-    use nom::IResult;
+    use crate::dns::dns::{DNSHeader,DNSAnswerEntry};
+    use crate::dns::parser::*;
 
     /// Parse a simple name with no pointers.
     #[test]
@@ -328,16 +422,9 @@ mod tests {
             0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, /* .com.... */
         ];
         let expected_remainder: &[u8] = &[0x00, 0x01, 0x00];
-        let res = dns_parse_name(buf, buf);
-        match res {
-            IResult::Done(remainder, name) => {
-                assert_eq!("client-cf.dropbox.com".as_bytes(), &name[..]);
-                assert_eq!(remainder, expected_remainder);
-            }
-            _ => {
-                assert!(false);
-            }
-        }
+        let (remainder,name) = dns_parse_name(buf, buf).unwrap();
+        assert_eq!("client-cf.dropbox.com".as_bytes(), &name[..]);
+        assert_eq!(remainder, expected_remainder);
     }
 
     /// Test parsing a name with pointers.
@@ -371,32 +458,32 @@ mod tests {
         let start1 = &buf[54..];
         let res1 = dns_parse_name(start1, message);
         assert_eq!(res1,
-                   IResult::Done(&start1[22..],
-                                 "www.suricata-ids.org".as_bytes().to_vec()));
+                   Ok((&start1[22..],
+                                 "www.suricata-ids.org".as_bytes().to_vec())));
 
         // The second name starts at offset 80, but is just a pointer
         // to the first.
         let start2 = &buf[80..];
         let res2 = dns_parse_name(start2, message);
         assert_eq!(res2,
-                   IResult::Done(&start2[2..],
-                                 "www.suricata-ids.org".as_bytes().to_vec()));
+                   Ok((&start2[2..],
+                                 "www.suricata-ids.org".as_bytes().to_vec())));
 
         // The third name starts at offset 94, but is a pointer to a
         // portion of the first.
         let start3 = &buf[94..];
         let res3 = dns_parse_name(start3, message);
         assert_eq!(res3,
-                   IResult::Done(&start3[2..],
-                                 "suricata-ids.org".as_bytes().to_vec()));
+                   Ok((&start3[2..],
+                                 "suricata-ids.org".as_bytes().to_vec())));
 
         // The fourth name starts at offset 110, but is a pointer to a
         // portion of the first.
         let start4 = &buf[110..];
         let res4 = dns_parse_name(start4, message);
         assert_eq!(res4,
-                   IResult::Done(&start4[2..],
-                                 "suricata-ids.org".as_bytes().to_vec()));
+                   Ok((&start4[2..],
+                                 "suricata-ids.org".as_bytes().to_vec())));
     }
 
     #[test]
@@ -429,8 +516,8 @@ mod tests {
 
         let res = dns_parse_name(start, message);
         assert_eq!(res,
-                   IResult::Done(&start[2..],
-                                 "block.g1.dropbox.com".as_bytes().to_vec()));
+                   Ok((&start[2..],
+                                 "block.g1.dropbox.com".as_bytes().to_vec())));
     }
 
     #[test]
@@ -448,7 +535,7 @@ mod tests {
 
         let res = dns_parse_request(pkt);
         match res {
-            IResult::Done(rem, request) => {
+            Ok((rem, request)) => {
 
                 // For now we have some remainder data as there is an
                 // additional record type we don't parse yet.
@@ -498,7 +585,7 @@ mod tests {
 
         let res = dns_parse_response(pkt);
         match res {
-            IResult::Done(rem, response) => {
+            Ok((rem, response)) => {
 
                 // The response should be full parsed.
                 assert_eq!(rem.len(), 0);
@@ -521,7 +608,7 @@ mod tests {
                 assert_eq!(answer1.rrclass, 1);
                 assert_eq!(answer1.ttl, 3544);
                 assert_eq!(answer1.data,
-                           "suricata-ids.org".as_bytes().to_vec());
+                           DNSRData::CNAME("suricata-ids.org".as_bytes().to_vec()));
 
                 let answer2 = &response.answers[1];
                 assert_eq!(answer2, &DNSAnswerEntry{
@@ -529,7 +616,7 @@ mod tests {
                     rrtype: 1,
                     rrclass: 1,
                     ttl: 244,
-                    data: [192, 0, 78, 24].to_vec(),
+                    data: DNSRData::A([192, 0, 78, 24].to_vec()),
                 });
 
                 let answer3 = &response.answers[2];
@@ -538,7 +625,7 @@ mod tests {
                     rrtype: 1,
                     rrclass: 1,
                     ttl: 244,
-                    data: [192, 0, 78, 25].to_vec(),
+                    data: DNSRData::A([192, 0, 78, 25].to_vec()),
                 })
 
             },
@@ -548,4 +635,243 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_dns_parse_response_nxdomain_soa() {
+        // DNS response with an SOA authority record from
+        // dns-udp-nxdomain-soa.pcap.
+        let pkt: &[u8] = &[
+                        0x82, 0x95, 0x81, 0x83, 0x00, 0x01, /* j....... */
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x03, 0x64, /* .......d */
+            0x6e, 0x65, 0x04, 0x6f, 0x69, 0x73, 0x66, 0x03, /* ne.oisf. */
+            0x6e, 0x65, 0x74, 0x00, 0x00, 0x01, 0x00, 0x01, /* net..... */
+            0xc0, 0x10, 0x00, 0x06, 0x00, 0x01, 0x00, 0x00, /* ........ */
+            0x03, 0x83, 0x00, 0x45, 0x06, 0x6e, 0x73, 0x2d, /* ...E.ns- */
+            0x31, 0x31, 0x30, 0x09, 0x61, 0x77, 0x73, 0x64, /* 110.awsd */
+            0x6e, 0x73, 0x2d, 0x31, 0x33, 0x03, 0x63, 0x6f, /* ns-13.co */
+            0x6d, 0x00, 0x11, 0x61, 0x77, 0x73, 0x64, 0x6e, /* m..awsdn */
+            0x73, 0x2d, 0x68, 0x6f, 0x73, 0x74, 0x6d, 0x61, /* s-hostma */
+            0x73, 0x74, 0x65, 0x72, 0x06, 0x61, 0x6d, 0x61, /* ster.ama */
+            0x7a, 0x6f, 0x6e, 0xc0, 0x3b, 0x00, 0x00, 0x00, /* zon.;... */
+            0x01, 0x00, 0x00, 0x1c, 0x20, 0x00, 0x00, 0x03, /* .... ... */
+            0x84, 0x00, 0x12, 0x75, 0x00, 0x00, 0x01, 0x51, /* ...u...Q */
+            0x80, 0x00, 0x00, 0x29, 0x02, 0x00, 0x00, 0x00, /* ...).... */
+            0x00, 0x00, 0x00, 0x00                          /* .... */
+        ];
+
+        let res = dns_parse_response(pkt);
+        match res {
+            Ok((rem, response)) => {
+
+                // For now we have some remainder data as there is an
+                // additional record type we don't parse yet.
+                assert!(rem.len() > 0);
+
+                assert_eq!(response.header, DNSHeader{
+                    tx_id: 0x8295,
+                    flags: 0x8183,
+                    questions: 1,
+                    answer_rr: 0,
+                    authority_rr: 1,
+                    additional_rr: 1,
+                });
+
+                assert_eq!(response.authorities.len(), 1);
+
+                let authority = &response.authorities[0];
+                assert_eq!(authority.name,
+                           "oisf.net".as_bytes().to_vec());
+                assert_eq!(authority.rrtype, 6);
+                assert_eq!(authority.rrclass, 1);
+                assert_eq!(authority.ttl, 899);
+                assert_eq!(authority.data,
+                           DNSRData::SOA(DNSRDataSOA{
+                               mname: "ns-110.awsdns-13.com".as_bytes().to_vec(),
+                               rname: "awsdns-hostmaster.amazon.com".as_bytes().to_vec(),
+                               serial: 1,
+                               refresh: 7200,
+                               retry: 900,
+                               expire: 1209600,
+                               minimum: 86400,
+                           }));
+            },
+            _ => {
+                assert!(false);
+            }
+        }
+    }
+
+
+    #[test]
+    fn test_dns_parse_response_null() {
+        // DNS response with a NULL record from
+        // https://redmine.openinfosecfoundation.org/attachments/2062
+
+        let pkt: &[u8] = &[
+            0x12, 0xb0, 0x84, 0x00, 0x00, 0x01, 0x00, 0x01, /* ........ */
+            0x00, 0x00, 0x00, 0x00, 0x0b, 0x76, 0x61, 0x61, /* .....vaa */
+            0x61, 0x61, 0x6b, 0x61, 0x72, 0x64, 0x6c, 0x69, /* aakardli */
+            0x06, 0x70, 0x69, 0x72, 0x61, 0x74, 0x65, 0x03, /* .pirate. */
+            0x73, 0x65, 0x61, 0x00, 0x00, 0x0a, 0x00, 0x01, /* sea..... */
+            0xc0, 0x0c, 0x00, 0x0a, 0x00, 0x01, 0x00, 0x00, /* ........ */
+            0x00, 0x00, 0x00, 0x09, 0x56, 0x41, 0x43, 0x4b, /* ....VACK */
+            0x44, 0x03, 0xc5, 0xe9, 0x01,                   /* D.... */
+        ];
+
+        let res = dns_parse_response(pkt);
+        match res {
+            Ok((rem, response)) => {
+                // The response should be fully parsed.
+                assert_eq!(rem.len(), 0);
+
+                assert_eq!(response.header, DNSHeader {
+                    tx_id: 0x12b0,
+                    flags: 0x8400,
+                    questions: 1,
+                    answer_rr: 1,
+                    authority_rr: 0,
+                    additional_rr: 0,
+                });
+
+                assert_eq!(response.queries.len(), 1);
+                let query = &response.queries[0];
+                assert_eq!(query.name,
+                           "vaaaakardli.pirate.sea".as_bytes().to_vec());
+                assert_eq!(query.rrtype, DNS_RECORD_TYPE_NULL);
+                assert_eq!(query.rrclass, 1);
+
+                assert_eq!(response.answers.len(), 1);
+
+                let answer = &response.answers[0];
+                assert_eq!(answer.name,
+                           "vaaaakardli.pirate.sea".as_bytes().to_vec());
+                assert_eq!(answer.rrtype, DNS_RECORD_TYPE_NULL);
+                assert_eq!(answer.rrclass, 1);
+                assert_eq!(answer.ttl, 0);
+                assert_eq!(answer.data, DNSRData::NULL(vec![
+                        0x56, 0x41, 0x43, 0x4b,       /* VACK */
+                        0x44, 0x03, 0xc5, 0xe9, 0x01, /* D.... */
+                        ]));
+            },
+            _ => {
+                assert!(false);
+            }
+        }
+    }
+
+
+    #[test]
+    fn test_dns_parse_rdata_sshfp() {
+        // Dummy data since we don't have a pcap sample.
+        let data: &[u8] = &[
+            // algo: DSS
+            0x02,
+            // fp_type: SHA-1
+            0x01,
+            // fingerprint: 123456789abcdef67890123456789abcdef67890
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf6, 0x78, 0x90,
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf6, 0x78, 0x90
+        ];
+
+        let res = dns_parse_rdata_sshfp(data);
+        match res {
+            Ok((rem, rdata)) => {
+
+                // The data should be fully parsed.
+                assert_eq!(rem.len(), 0);
+
+                match rdata {
+                    DNSRData::SSHFP(sshfp) => {
+                        assert_eq!(sshfp.algo, 2);
+                        assert_eq!(sshfp.fp_type, 1);
+                        assert_eq!(sshfp.fingerprint, &data[2..]);
+                    },
+                    _ => {
+                        assert!(false);
+                    }
+                }
+            },
+            _ => {
+                assert!(false);
+            }
+        }
+    }
+
+    #[test]
+    fn test_dns_parse_rdata_srv() {
+    /*  ; <<>> DiG 9.11.5-P4-5.1+deb10u2-Debian <<>> _sip._udp.sip.voice.google.com SRV
+        ;; global options: +cmd
+        ;; Got answer:
+        ;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1524
+        ;; flags: qr rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 3
+
+        [...]
+
+        ;; ANSWER SECTION:
+        _sip._udp.sip.voice.google.com.	300 IN	SRV	10 1 5060 sip-anycast-1.voice.google.com.
+        _sip._udp.sip.voice.google.com.	300 IN	SRV	20 1 5060 sip-anycast-2.voice.google.com.
+
+        [...]
+
+        ;; Query time: 72 msec
+        ;; MSG SIZE  rcvd: 191   */
+
+        let pkt: &[u8] = &[
+            0xeb, 0x56, 0x81, 0x80, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00,
+            0x00, 0x01, 0x04, 0x5f, 0x73, 0x69, 0x70, 0x04, 0x5f, 0x75,
+            0x64, 0x70, 0x03, 0x73, 0x69, 0x70, 0x05, 0x76, 0x6f, 0x69,
+            0x63, 0x65, 0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
+            0x63, 0x6f, 0x6d, 0x00, 0x00, 0x21, 0x00, 0x01, 0xc0, 0x0c,
+            0x00, 0x21, 0x00, 0x01, 0x00, 0x00, 0x01, 0x13, 0x00, 0x26,
+            0x00, 0x14, 0x00, 0x01, 0x13, 0xc4, 0x0d, 0x73, 0x69, 0x70,
+            0x2d, 0x61, 0x6e, 0x79, 0x63, 0x61, 0x73, 0x74, 0x2d, 0x32,
+            0x05, 0x76, 0x6f, 0x69, 0x63, 0x65, 0x06, 0x67, 0x6f, 0x6f,
+            0x67, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0xc0, 0x0c,
+            0x00, 0x21, 0x00, 0x01, 0x00, 0x00, 0x01, 0x13, 0x00, 0x26,
+            0x00, 0x0a, 0x00, 0x01, 0x13, 0xc4, 0x0d, 0x73, 0x69, 0x70,
+            0x2d, 0x61, 0x6e, 0x79, 0x63, 0x61, 0x73, 0x74, 0x2d, 0x31,
+            0x05, 0x76, 0x6f, 0x69, 0x63, 0x65, 0x06, 0x67, 0x6f, 0x6f,
+            0x67, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00
+        ];
+
+        let res = dns_parse_response(pkt);
+        match res {
+            Ok((rem, response)) => {
+
+                // The data should be fully parsed.
+                assert_eq!(rem.len(), 0);
+
+                assert_eq!(response.answers.len(), 2);
+
+                let answer1 = &response.answers[0];
+                match &answer1.data {
+                    DNSRData::SRV(srv) => {
+                        assert_eq!(srv.priority, 20);
+                        assert_eq!(srv.weight, 1);
+                        assert_eq!(srv.port, 5060);
+                        assert_eq!(srv.target,
+                            "sip-anycast-2.voice.google.com".as_bytes().to_vec());
+                    }
+                    _ => {
+                        assert!(false);
+                    }
+                }
+                let answer2 = &response.answers[1];
+                match &answer2.data {
+                    DNSRData::SRV(srv) => {
+                        assert_eq!(srv.priority, 10);
+                        assert_eq!(srv.weight, 1);
+                        assert_eq!(srv.port, 5060);
+                        assert_eq!(srv.target,
+                            "sip-anycast-1.voice.google.com".as_bytes().to_vec());
+                    }
+                    _ => {
+                        assert!(false);
+                    }
+                }
+            },
+            _ => {
+                assert!(false);
+            }
+        }
+    }
 }

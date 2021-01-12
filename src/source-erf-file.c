@@ -68,9 +68,9 @@ TmEcode ReceiveErfFileThreadInit(ThreadVars *, const void *, void **);
 void ReceiveErfFileThreadExitStats(ThreadVars *, void *);
 TmEcode ReceiveErfFileThreadDeinit(ThreadVars *, void *);
 
-TmEcode DecodeErfFileThreadInit(ThreadVars *, const void *, void **);
-TmEcode DecodeErfFileThreadDeinit(ThreadVars *tv, void *data);
-TmEcode DecodeErfFile(ThreadVars *, Packet *, void *, PacketQueue *, PacketQueue *);
+static TmEcode DecodeErfFileThreadInit(ThreadVars *, const void *, void **);
+static TmEcode DecodeErfFileThreadDeinit(ThreadVars *tv, void *data);
+static TmEcode DecodeErfFile(ThreadVars *, Packet *, void *);
 
 /**
  * \brief Register the ERF file receiver (reader) module.
@@ -86,7 +86,6 @@ TmModuleReceiveErfFileRegister(void)
     tmm_modules[TMM_RECEIVEERFFILE].ThreadExitPrintStats =
         ReceiveErfFileThreadExitStats;
     tmm_modules[TMM_RECEIVEERFFILE].ThreadDeinit = NULL;
-    tmm_modules[TMM_RECEIVEERFFILE].RegisterTests = NULL;
     tmm_modules[TMM_RECEIVEERFFILE].cap_flags = 0;
     tmm_modules[TMM_RECEIVEERFFILE].flags = TM_FLAG_RECEIVE_TM;
 }
@@ -102,7 +101,6 @@ TmModuleDecodeErfFileRegister(void)
     tmm_modules[TMM_DECODEERFFILE].Func = DecodeErfFile;
     tmm_modules[TMM_DECODEERFFILE].ThreadExitPrintStats = NULL;
     tmm_modules[TMM_DECODEERFFILE].ThreadDeinit = DecodeErfFileThreadDeinit;
-    tmm_modules[TMM_DECODEERFFILE].RegisterTests = NULL;
     tmm_modules[TMM_DECODEERFFILE].cap_flags = 0;
     tmm_modules[TMM_DECODEERFFILE].flags = TM_FLAG_DECODE_TM;
 }
@@ -165,8 +163,13 @@ static inline TmEcode ReadErfRecord(ThreadVars *tv, Packet *p, void *data)
         }
         SCReturnInt(TM_ECODE_FAILED);
     }
-    int rlen = SCNtohs(dr.rlen);
-    int wlen = SCNtohs(dr.wlen);
+    uint16_t rlen = SCNtohs(dr.rlen);
+    uint16_t wlen = SCNtohs(dr.wlen);
+    if (rlen < sizeof(DagRecord)) {
+        SCLogError(SC_ERR_ERF_BAD_RLEN, "Bad ERF record, "
+            "record length less than size of header");
+        SCReturnInt(TM_ECODE_FAILED);
+    }
     r = fread(GET_PKT_DATA(p), rlen - sizeof(DagRecord), 1, etv->erf);
     if (r < 1) {
         if (feof(etv->erf)) {
@@ -275,20 +278,17 @@ TmEcode DecodeErfFileThreadDeinit(ThreadVars *tv, void *data)
  * off to the ethernet decoder.
  */
 TmEcode
-DecodeErfFile(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq, PacketQueue *postpq)
+DecodeErfFile(ThreadVars *tv, Packet *p, void *data)
 {
     SCEnter();
     DecodeThreadVars *dtv = (DecodeThreadVars *)data;
 
-    /* XXX HACK: flow timeout can call us for injected pseudo packets
-     *           see bug: https://redmine.openinfosecfoundation.org/issues/1107 */
-    if (p->flags & PKT_PSEUDO_STREAM_END)
-        return TM_ECODE_OK;
+    BUG_ON(PKT_IS_PSEUDOPKT(p));
 
     /* Update counters. */
     DecodeUpdatePacketCounters(tv, dtv, p);
 
-    DecodeEthernet(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p), pq);
+    DecodeEthernet(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p));
 
     PacketDecodeFinalize(tv, dtv, p);
 

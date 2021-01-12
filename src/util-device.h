@@ -42,7 +42,6 @@ typedef struct LiveDevice_ {
     char dev_short[MAX_DEVNAME + 1];
     bool tenant_id_set;
 
-    int ignore_checksum;
     int id;
 
     SC_ATOMIC_DECLARE(uint64_t, pkts);
@@ -60,8 +59,18 @@ typedef struct LiveDeviceName_ {
     TAILQ_ENTRY(LiveDeviceName_) next;
 } LiveDeviceName;
 
+void LiveDevRegisterExtension(void);
+
 int LiveRegisterDeviceName(const char *dev);
+int LiveGetDeviceNameCount(void);
+const char *LiveGetDeviceNameName(int number);
 int LiveRegisterDevice(const char *dev);
+int LiveDevUseBypass(LiveDevice *dev);
+void LiveDevSetBypassStats(LiveDevice *dev, uint64_t cnt, int family);
+void LiveDevAddBypassStats(LiveDevice *dev, uint64_t cnt, int family);
+void LiveDevSubBypassStats(LiveDevice *dev, uint64_t cnt, int family);
+void LiveDevAddBypassFail(LiveDevice *dev, uint64_t cnt, int family);
+void LiveDevAddBypassSuccess(LiveDevice *dev, uint64_t cnt, int family);
 int LiveGetDeviceCount(void);
 const char *LiveGetDeviceName(int number);
 LiveDevice *LiveGetDevice(const char *dev);
@@ -78,6 +87,7 @@ void LiveDeviceFinalize(void);
 #ifdef BUILD_UNIX_SOCKET
 TmEcode LiveDeviceIfaceStat(json_t *cmd, json_t *server_msg, void *data);
 TmEcode LiveDeviceIfaceList(json_t *cmd, json_t *server_msg, void *data);
+TmEcode LiveDeviceGetBypassedStats(json_t *cmd, json_t *answer, void *data);
 #endif
 
 #endif /* __UTIL_DEVICE_H__ */

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -94,7 +94,7 @@ void TmqhFlowPrintAutofpHandler(void)
 /* same as 'simple' */
 Packet *TmqhInputFlow(ThreadVars *tv)
 {
-    PacketQueue *q = &trans_q[tv->inq->id];
+    PacketQueue *q = tv->inq->pq;
 
     StatsSyncCountersIfSignalled(tv);
 
@@ -126,8 +126,6 @@ static int StoreQueueId(TmqhFlowCtx *ctx, char *name)
     }
     tmq->writer_cnt++;
 
-    uint16_t id = tmq->id;
-
     if (ctx->queues == NULL) {
         ctx->size = 1;
         ctx->queues = SCMalloc(ctx->size * sizeof(TmqhFlowMode));
@@ -147,7 +145,7 @@ static int StoreQueueId(TmqhFlowCtx *ctx, char *name)
 
         memset(ctx->queues + (ctx->size - 1), 0, sizeof(TmqhFlowMode));
     }
-    ctx->queues[ctx->size - 1].q = &trans_q[id];
+    ctx->queues[ctx->size - 1].q = tmq->pq;
 
     return 0;
 }
@@ -222,8 +220,7 @@ void TmqhOutputFlowFreeCtx(void *ctx)
 
 void TmqhOutputFlowHash(ThreadVars *tv, Packet *p)
 {
-    int16_t qid = 0;
-
+    uint32_t qid;
     TmqhFlowCtx *ctx = (TmqhFlowCtx *)tv->outctx;
 
     if (p->flags & PKT_WANTS_FLOW) {
@@ -253,24 +250,19 @@ void TmqhOutputFlowHash(ThreadVars *tv, Packet *p)
  */
 void TmqhOutputFlowIPPair(ThreadVars *tv, Packet *p)
 {
-    int16_t qid = 0;
     uint32_t addr_hash = 0;
-    int i;
 
     TmqhFlowCtx *ctx = (TmqhFlowCtx *)tv->outctx;
 
     if (p->src.family == AF_INET6) {
-        for (i = 0; i < 4; i++) {
+        for (int i = 0; i < 4; i++) {
             addr_hash += p->src.addr_data32[i] + p->dst.addr_data32[i];
         }
     } else {
         addr_hash = p->src.addr_data32[0] + p->dst.addr_data32[0];
     }
 
-    /* we don't have to worry about possible overflow, since
-     * ctx->size will be lesser than 2 ** 31 for sure */
-    qid = addr_hash % ctx->size;
-
+    uint32_t qid = addr_hash % ctx->size;
     PacketQueue *q = ctx->queues[qid].q;
     SCMutexLock(&q->mutex_q);
     PacketEnqueue(q, p);
@@ -284,138 +276,98 @@ void TmqhOutputFlowIPPair(ThreadVars *tv, Packet *p)
 
 static int TmqhOutputFlowSetupCtxTest01(void)
 {
-    int retval = 0;
-    Tmq *tmq = NULL;
-    TmqhFlowCtx *fctx = NULL;
-
     TmqResetQueues();
 
-    tmq = TmqCreateQueue("queue1");
-    if (tmq == NULL)
-        goto end;
-    tmq = TmqCreateQueue("queue2");
-    if (tmq == NULL)
-        goto end;
-    tmq = TmqCreateQueue("another");
-    if (tmq == NULL)
-        goto end;
-    tmq = TmqCreateQueue("yetanother");
-    if (tmq == NULL)
-        goto end;
+    Tmq *tmq1 = TmqCreateQueue("queue1");
+    FAIL_IF_NULL(tmq1);
+    Tmq *tmq2 = TmqCreateQueue("queue2");
+    FAIL_IF_NULL(tmq2);
+    Tmq *tmq3 = TmqCreateQueue("another");
+    FAIL_IF_NULL(tmq3);
+    Tmq *tmq4 = TmqCreateQueue("yetanother");
+    FAIL_IF_NULL(tmq4);
 
     const char *str = "queue1,queue2,another,yetanother";
     void *ctx = TmqhOutputFlowSetupCtx(str);
+    FAIL_IF_NULL(ctx);
 
-    if (ctx == NULL)
-        goto end;
+    TmqhFlowCtx *fctx = (TmqhFlowCtx *)ctx;
 
-    fctx = (TmqhFlowCtx *)ctx;
+    FAIL_IF_NOT(fctx->size == 4);
 
-    if (fctx->size != 4)
-        goto end;
+    FAIL_IF_NULL(fctx->queues);
 
-    if (fctx->queues == NULL)
-        goto end;
+    FAIL_IF_NOT(fctx->queues[0].q == tmq1->pq);
+    FAIL_IF_NOT(fctx->queues[1].q == tmq2->pq);
+    FAIL_IF_NOT(fctx->queues[2].q == tmq3->pq);
+    FAIL_IF_NOT(fctx->queues[3].q == tmq4->pq);
 
-    if (fctx->queues[0].q != &trans_q[0])
-        goto end;
-    if (fctx->queues[1].q != &trans_q[1])
-        goto end;
-    if (fctx->queues[2].q != &trans_q[2])
-        goto end;
-    if (fctx->queues[3].q != &trans_q[3])
-        goto end;
-
-    retval = 1;
-end:
-    if (fctx != NULL)
-        TmqhOutputFlowFreeCtx(fctx);
+    TmqhOutputFlowFreeCtx(fctx);
     TmqResetQueues();
-    return retval;
+    PASS;
 }
 
 static int TmqhOutputFlowSetupCtxTest02(void)
 {
-    int retval = 0;
-    Tmq *tmq = NULL;
-    TmqhFlowCtx *fctx = NULL;
-
     TmqResetQueues();
 
-    tmq = TmqCreateQueue("queue1");
-    if (tmq == NULL)
-        goto end;
-    tmq = TmqCreateQueue("queue2");
-    if (tmq == NULL)
-        goto end;
-    tmq = TmqCreateQueue("another");
-    if (tmq == NULL)
-        goto end;
-    tmq = TmqCreateQueue("yetanother");
-    if (tmq == NULL)
-        goto end;
+    Tmq *tmq1 = TmqCreateQueue("queue1");
+    FAIL_IF_NULL(tmq1);
+    Tmq *tmq2 = TmqCreateQueue("queue2");
+    FAIL_IF_NULL(tmq2);
+    Tmq *tmq3 = TmqCreateQueue("another");
+    FAIL_IF_NULL(tmq3);
+    Tmq *tmq4 = TmqCreateQueue("yetanother");
+    FAIL_IF_NULL(tmq4);
 
     const char *str = "queue1";
     void *ctx = TmqhOutputFlowSetupCtx(str);
+    FAIL_IF_NULL(ctx);
 
-    if (ctx == NULL)
-        goto end;
+    TmqhFlowCtx *fctx = (TmqhFlowCtx *)ctx;
 
-    fctx = (TmqhFlowCtx *)ctx;
+    FAIL_IF_NOT(fctx->size == 1);
 
-    if (fctx->size != 1)
-        goto end;
+    FAIL_IF_NULL(fctx->queues);
 
-    if (fctx->queues == NULL)
-        goto end;
-
-    if (fctx->queues[0].q != &trans_q[0])
-        goto end;
-
-    retval = 1;
-end:
-    if (fctx != NULL)
-        TmqhOutputFlowFreeCtx(fctx);
+    FAIL_IF_NOT(fctx->queues[0].q == tmq1->pq);
+    TmqhOutputFlowFreeCtx(fctx);
     TmqResetQueues();
-    return retval;
+
+    PASS;
 }
 
 static int TmqhOutputFlowSetupCtxTest03(void)
 {
-    int retval = 0;
-    TmqhFlowCtx *fctx = NULL;
-
     TmqResetQueues();
 
     const char *str = "queue1,queue2,another,yetanother";
     void *ctx = TmqhOutputFlowSetupCtx(str);
+    FAIL_IF_NULL(ctx);
 
-    if (ctx == NULL)
-        goto end;
+    TmqhFlowCtx *fctx = (TmqhFlowCtx *)ctx;
 
-    fctx = (TmqhFlowCtx *)ctx;
+    FAIL_IF_NOT(fctx->size == 4);
 
-    if (fctx->size != 4)
-        goto end;
+    FAIL_IF_NULL(fctx->queues);
 
-    if (fctx->queues == NULL)
-        goto end;
+    Tmq *tmq1 = TmqGetQueueByName("queue1");
+    FAIL_IF_NULL(tmq1);
+    Tmq *tmq2 = TmqGetQueueByName("queue2");
+    FAIL_IF_NULL(tmq2);
+    Tmq *tmq3 = TmqGetQueueByName("another");
+    FAIL_IF_NULL(tmq3);
+    Tmq *tmq4 = TmqGetQueueByName("yetanother");
+    FAIL_IF_NULL(tmq4);
 
-    if (fctx->queues[0].q != &trans_q[0])
-        goto end;
-    if (fctx->queues[1].q != &trans_q[1])
-        goto end;
-    if (fctx->queues[2].q != &trans_q[2])
-        goto end;
-    if (fctx->queues[3].q != &trans_q[3])
-        goto end;
+    FAIL_IF_NOT(fctx->queues[0].q == tmq1->pq);
+    FAIL_IF_NOT(fctx->queues[1].q == tmq2->pq);
+    FAIL_IF_NOT(fctx->queues[2].q == tmq3->pq);
+    FAIL_IF_NOT(fctx->queues[3].q == tmq4->pq);
 
-    retval = 1;
-end:
-    if (fctx != NULL)
-        TmqhOutputFlowFreeCtx(fctx);
+    TmqhOutputFlowFreeCtx(fctx);
     TmqResetQueues();
-    return retval;
+    PASS;
 }
 
 #endif /* UNITTESTS */

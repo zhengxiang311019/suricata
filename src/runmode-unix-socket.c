@@ -49,7 +49,7 @@
 
 #include "conf-yaml-loader.h"
 
-static const char *default_mode = NULL;
+#include "datasets.h"
 
 int unix_socket_mode_is_running = 0;
 
@@ -79,7 +79,7 @@ typedef struct MemcapCommand_ {
 
 const char *RunModeUnixSocketGetDefaultMode(void)
 {
-    return default_mode;
+    return "autofp";
 }
 
 #ifdef BUILD_UNIX_SOCKET
@@ -569,15 +569,16 @@ static TmEcode UnixSocketPcapFilesCheck(void *data)
 
     this->current_file = cfile;
 
+    SCLogInfo("Starting run for '%s'", this->current_file->filename);
+
     PreRunInit(RUNMODE_PCAP_FILE);
     PreRunPostPrivsDropInit(RUNMODE_PCAP_FILE);
-    RunModeDispatch(RUNMODE_PCAP_FILE, NULL);
+    RunModeDispatch(RUNMODE_PCAP_FILE, NULL, NULL, NULL);
 
     /* Un-pause all the paused threads */
     TmThreadWaitOnThreadInit();
+    PacketPoolPostRunmodes();
     TmThreadContinueThreads();
-
-    SCLogInfo("Starting run for '%s'", this->current_file->filename);
 
     return TM_ECODE_OK;
 }
@@ -593,17 +594,18 @@ void RunModeUnixSocketRegister(void)
     RunModeRegisterNewRunMode(RUNMODE_UNIX_SOCKET, "autofp",
                               "Unix socket mode",
                               RunModeUnixSocketMaster);
-    default_mode = "autofp";
 #endif
 }
 
 TmEcode UnixSocketPcapFile(TmEcode tm, struct timespec *last_processed)
 {
 #ifdef BUILD_UNIX_SOCKET
-    SCCtrlMutexLock(&unix_manager_pcap_last_processed_mutex);
-    unix_manager_pcap_last_processed.tv_sec = last_processed->tv_sec;
-    unix_manager_pcap_last_processed.tv_nsec = last_processed->tv_nsec;
-    SCCtrlMutexUnlock(&unix_manager_pcap_last_processed_mutex);
+    if(last_processed) {
+        SCCtrlMutexLock(&unix_manager_pcap_last_processed_mutex);
+        unix_manager_pcap_last_processed.tv_sec = last_processed->tv_sec;
+        unix_manager_pcap_last_processed.tv_nsec = last_processed->tv_nsec;
+        SCCtrlMutexUnlock(&unix_manager_pcap_last_processed_mutex);
+    }
     switch (tm) {
         case TM_ECODE_DONE:
             SCLogInfo("Marking current task as done");
@@ -614,7 +616,7 @@ TmEcode UnixSocketPcapFile(TmEcode tm, struct timespec *last_processed)
             unix_manager_pcap_task_running = 0;
             unix_manager_pcap_task_failed = 1;
             //if we return failed, we can't stop the thread and suricata will fail to close
-            return TM_ECODE_DONE;
+            return TM_ECODE_FAILED;
         case TM_ECODE_OK:
             if (unix_manager_pcap_task_interrupted == 1) {
                 SCLogInfo("Interrupting current run mode");
@@ -629,6 +631,119 @@ TmEcode UnixSocketPcapFile(TmEcode tm, struct timespec *last_processed)
 }
 
 #ifdef BUILD_UNIX_SOCKET
+/**
+ * \brief Command to add data to a dataset
+ *
+ * \param cmd the content of command Arguments as a json_t object
+ * \param answer the json_t object that has to be used to answer
+ * \param data pointer to data defining the context here a PcapCommand::
+ */
+TmEcode UnixSocketDatasetAdd(json_t *cmd, json_t* answer, void *data)
+{
+    /* 1 get dataset name */
+    json_t *narg = json_object_get(cmd, "setname");
+    if (!json_is_string(narg)) {
+        json_object_set_new(answer, "message", json_string("setname is not a string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *set_name = json_string_value(narg);
+
+    /* 2 get the data type */
+    json_t *targ = json_object_get(cmd, "settype");
+    if (!json_is_string(targ)) {
+        json_object_set_new(answer, "message", json_string("settype is not a string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *type = json_string_value(targ);
+
+    /* 3 get value */
+    json_t *varg = json_object_get(cmd, "datavalue");
+    if (!json_is_string(varg)) {
+        json_object_set_new(answer, "message", json_string("datavalue is not string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *value = json_string_value(varg);
+
+    SCLogDebug("dataset-add: %s type %s value %s", set_name, type, value);
+
+    enum DatasetTypes t = DatasetGetTypeFromString(type);
+    if (t == DATASET_TYPE_NOTSET) {
+        json_object_set_new(answer, "message", json_string("unknown settype"));
+        return TM_ECODE_FAILED;
+    }
+
+    Dataset *set = DatasetFind(set_name, t);
+    if (set == NULL) {
+        json_object_set_new(answer, "message", json_string("set not found or wrong type"));
+        return TM_ECODE_FAILED;
+    }
+
+    int r = DatasetAddSerialized(set, value);
+    if (r == 1) {
+        json_object_set_new(answer, "message", json_string("data added"));
+        return TM_ECODE_OK;
+    } else if (r == 0) {
+        json_object_set_new(answer, "message", json_string("data already in set"));
+        return TM_ECODE_OK;
+    } else {
+        json_object_set_new(answer, "message", json_string("failed to add data"));
+        return TM_ECODE_FAILED;
+    }
+}
+
+TmEcode UnixSocketDatasetRemove(json_t *cmd, json_t* answer, void *data)
+{
+    /* 1 get dataset name */
+    json_t *narg = json_object_get(cmd, "setname");
+    if (!json_is_string(narg)) {
+        json_object_set_new(answer, "message", json_string("setname is not a string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *set_name = json_string_value(narg);
+
+    /* 2 get the data type */
+    json_t *targ = json_object_get(cmd, "settype");
+    if (!json_is_string(targ)) {
+        json_object_set_new(answer, "message", json_string("settype is not a string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *type = json_string_value(targ);
+
+    /* 3 get value */
+    json_t *varg = json_object_get(cmd, "datavalue");
+    if (!json_is_string(varg)) {
+        json_object_set_new(answer, "message", json_string("datavalue is not string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *value = json_string_value(varg);
+
+    SCLogDebug("dataset-remove: %s type %s value %s", set_name, type, value);
+
+    enum DatasetTypes t = DatasetGetTypeFromString(type);
+    if (t == DATASET_TYPE_NOTSET) {
+        json_object_set_new(answer, "message", json_string("unknown settype"));
+        return TM_ECODE_FAILED;
+    }
+
+    Dataset *set = DatasetFind(set_name, t);
+    if (set == NULL) {
+        json_object_set_new(answer, "message", json_string("set not found or wrong type"));
+        return TM_ECODE_FAILED;
+    }
+
+    int r = DatasetRemoveSerialized(set, value);
+    if (r == 1) {
+        json_object_set_new(answer, "message", json_string("data removed"));
+        return TM_ECODE_OK;
+    } else if (r == 0) {
+        json_object_set_new(answer, "message", json_string("data is busy, try again"));
+        return TM_ECODE_OK;
+    } else {
+        json_object_set_new(answer, "message", json_string("failed to remove data"));
+        return TM_ECODE_FAILED;
+    }
+}
+
 /**
  * \brief Command to add a tenant handler
  *
@@ -788,7 +903,7 @@ TmEcode UnixSocketUnregisterTenantHandler(json_t *cmd, json_t* answer, void *dat
         return TM_ECODE_FAILED;
     }
 
-    json_object_set_new(answer, "message", json_string("handler added"));
+    json_object_set_new(answer, "message", json_string("handler removed"));
     return TM_ECODE_OK;
 }
 

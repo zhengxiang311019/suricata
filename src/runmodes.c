@@ -38,12 +38,12 @@
 #include "runmodes.h"
 #include "util-unittest.h"
 #include "util-misc.h"
+#include "util-plugin.h"
 
 #include "output.h"
 
 #include "alert-fastlog.h"
 #include "alert-prelude.h"
-#include "alert-unified2-alert.h"
 #include "alert-debuglog.h"
 
 #include "log-httplog.h"
@@ -55,7 +55,10 @@
 #include "flow-bypass.h"
 #include "counters.h"
 
+#include "suricata-plugin.h"
+
 int debuglog_enabled = 0;
+int threading_set_cpu_affinity = FALSE;
 
 /* Runmode Global Thread Names */
 const char *thread_name_autofp = "RX";
@@ -64,6 +67,7 @@ const char *thread_name_workers = "W";
 const char *thread_name_verdict = "TX";
 const char *thread_name_flow_mgr = "FM";
 const char *thread_name_flow_rec = "FR";
+const char *thread_name_flow_bypass = "FB";
 const char *thread_name_unix_socket = "US";
 const char *thread_name_detect_loader = "DL";
 const char *thread_name_counter_stats = "CS";
@@ -74,7 +78,7 @@ const char *thread_name_counter_wakeup = "CW";
  */
 typedef struct RunMode_ {
     /* the runmode type */
-    int runmode;
+    enum RunModes runmode;
     const char *name;
     const char *description;
     /* runmode function */
@@ -82,7 +86,7 @@ typedef struct RunMode_ {
 } RunMode;
 
 typedef struct RunModes_ {
-    int no_of_runmodes;
+    int cnt;
     RunMode *runmodes;
 } RunModes;
 
@@ -121,6 +125,8 @@ static const char *RunModeTranslateModeToName(int runmode)
 #else
             return "PFRING(DISABLED)";
 #endif
+        case RUNMODE_PLUGIN:
+            return "PLUGIN";
         case RUNMODE_NFQ:
             return "NFQ";
         case RUNMODE_NFLOG:
@@ -135,8 +141,6 @@ static const char *RunModeTranslateModeToName(int runmode)
             return "NAPATECH";
         case RUNMODE_UNITTEST:
             return "UNITTEST";
-        case RUNMODE_TILERA_MPIPE:
-            return "MPIPE";
         case RUNMODE_AFP_DEV:
             return "AF_PACKET_DEV";
         case RUNMODE_NETMAP:
@@ -154,8 +158,7 @@ static const char *RunModeTranslateModeToName(int runmode)
             return "WINDIVERT(DISABLED)";
 #endif
         default:
-            SCLogError(SC_ERR_UNKNOWN_RUN_MODE, "Unknown runtime mode. Aborting");
-            exit(EXIT_FAILURE);
+            FatalError(SC_ERR_UNKNOWN_RUN_MODE, "Unknown runtime mode. Aborting");
     }
 }
 
@@ -167,15 +170,14 @@ static const char *RunModeTranslateModeToName(int runmode)
  * \param runmode            The runmode type.
  * \param runmode_customd_id The runmode custom id.
  */
-static RunMode *RunModeGetCustomMode(int runmode, const char *custom_mode)
+static RunMode *RunModeGetCustomMode(enum RunModes runmode, const char *custom_mode)
 {
-    int i;
-
-    for (i = 0; i < runmodes[runmode].no_of_runmodes; i++) {
-        if (strcmp(runmodes[runmode].runmodes[i].name, custom_mode) == 0)
-            return &runmodes[runmode].runmodes[i];
+    if (runmode < RUNMODE_USER_MAX) {
+        for (int i = 0; i < runmodes[runmode].cnt; i++) {
+            if (strcmp(runmodes[runmode].runmodes[i].name, custom_mode) == 0)
+                return &runmodes[runmode].runmodes[i];
+        }
     }
-
     return NULL;
 }
 
@@ -224,7 +226,6 @@ void RunModeRegisterRunModes(void)
     RunModeIdsAFPRegister();
     RunModeIdsNetmapRegister();
     RunModeIdsNflogRegister();
-    RunModeTileMpipeRegister();
     RunModeUnixSocketRegister();
     RunModeIpsWinDivertRegister();
 #ifdef UNITTESTS
@@ -249,7 +250,7 @@ void RunModeListRunmodes(void)
     int j = 0;
     for ( ; i < RUNMODE_USER_MAX; i++) {
         int mode_displayed = 0;
-        for (j = 0; j < runmodes[i].no_of_runmodes; j++) {
+        for (j = 0; j < runmodes[i].cnt; j++) {
             if (mode_displayed == 1) {
                 printf("|                   ----------------------------------------------"
                        "-----------------------\n");
@@ -271,7 +272,7 @@ void RunModeListRunmodes(void)
         if (mode_displayed == 1) {
             printf("|-----------------------------------------------------------------"
                    "-----------------------\n");
-        } 
+        }
     }
 
     return;
@@ -279,7 +280,8 @@ void RunModeListRunmodes(void)
 
 /**
  */
-void RunModeDispatch(int runmode, const char *custom_mode)
+void RunModeDispatch(int runmode, const char *custom_mode,
+    const char *capture_plugin_name, const char *capture_plugin_args)
 {
     char *local_custom_mode = NULL;
 
@@ -305,6 +307,17 @@ void RunModeDispatch(int runmode, const char *custom_mode)
                 custom_mode = RunModeIdsPfringGetDefaultMode();
                 break;
 #endif
+            case RUNMODE_PLUGIN: {
+#ifdef HAVE_PLUGINS
+                SCCapturePlugin *plugin = SCPluginFindCaptureByName(capture_plugin_name);
+                if (plugin == NULL) {
+                    FatalError(SC_ERR_PLUGIN, "No capture plugin found with name %s",
+                            capture_plugin_name);
+                }
+                custom_mode = (const char *)plugin->GetDefaultMode();
+#endif
+                break;
+            }
             case RUNMODE_NFQ:
                 custom_mode = RunModeIpsNFQGetDefaultMode();
                 break;
@@ -316,9 +329,6 @@ void RunModeDispatch(int runmode, const char *custom_mode)
                 break;
             case RUNMODE_DAG:
                 custom_mode = RunModeErfDagGetDefaultMode();
-                break;
-            case RUNMODE_TILERA_MPIPE:
-                custom_mode = RunModeTileMpipeGetDefaultMode();
                 break;
             case RUNMODE_NAPATECH:
                 custom_mode = RunModeNapatechGetDefaultMode();
@@ -341,8 +351,7 @@ void RunModeDispatch(int runmode, const char *custom_mode)
                 break;
 #endif
             default:
-                SCLogError(SC_ERR_UNKNOWN_RUN_MODE, "Unknown runtime mode. Aborting");
-                exit(EXIT_FAILURE);
+                FatalError(SC_ERR_FATAL, "Unknown runtime mode. Aborting");
         }
     } else { /* if (custom_mode == NULL) */
         /* Add compability with old 'worker' name */
@@ -351,8 +360,7 @@ void RunModeDispatch(int runmode, const char *custom_mode)
                          "to 'workers', please modify your setup.");
             local_custom_mode = SCStrdup("workers");
             if (unlikely(local_custom_mode == NULL)) {
-                SCLogError(SC_ERR_MEM_ALLOC, "Unable to dup custom mode");
-                exit(EXIT_FAILURE);
+                FatalError(SC_ERR_FATAL, "Unable to dup custom mode");
             }
             custom_mode = local_custom_mode;
         }
@@ -373,8 +381,7 @@ void RunModeDispatch(int runmode, const char *custom_mode)
     }
     active_runmode = SCStrdup(custom_mode);
     if (unlikely(active_runmode == NULL)) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Unable to dup active mode");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Unable to dup active mode");
     }
 
     if (strcasecmp(active_runmode, "autofp") == 0) {
@@ -423,19 +430,18 @@ int RunModeNeedsBypassManager(void)
  * \param description Description for this runmode.
  * \param RunModeFunc The function to be run for this runmode.
  */
-void RunModeRegisterNewRunMode(int runmode, const char *name,
+void RunModeRegisterNewRunMode(enum RunModes runmode,
+                               const char *name,
                                const char *description,
                                int (*RunModeFunc)(void))
 {
-    void *ptmp;
     if (RunModeGetCustomMode(runmode, name) != NULL) {
-        SCLogError(SC_ERR_RUNMODE, "A runmode by this custom name has already "
-                   "been registered.  Please use an unique name");
-        return;
+        FatalError(SC_ERR_RUNMODE, "runmode '%s' has already "
+                   "been registered. Please use an unique name.", name);
     }
 
-    ptmp = SCRealloc(runmodes[runmode].runmodes,
-                     (runmodes[runmode].no_of_runmodes + 1) * sizeof(RunMode));
+    void *ptmp = SCRealloc(runmodes[runmode].runmodes,
+                     (runmodes[runmode].cnt + 1) * sizeof(RunMode));
     if (ptmp == NULL) {
         SCFree(runmodes[runmode].runmodes);
         runmodes[runmode].runmodes = NULL;
@@ -443,19 +449,18 @@ void RunModeRegisterNewRunMode(int runmode, const char *name,
     }
     runmodes[runmode].runmodes = ptmp;
 
-    RunMode *mode = &runmodes[runmode].runmodes[runmodes[runmode].no_of_runmodes];
-    runmodes[runmode].no_of_runmodes++;
+    RunMode *mode = &runmodes[runmode].runmodes[runmodes[runmode].cnt];
+    runmodes[runmode].cnt++;
+    memset(mode, 0x00, sizeof(*mode));
 
     mode->runmode = runmode;
     mode->name = SCStrdup(name);
     if (unlikely(mode->name == NULL)) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Failed to allocate string");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_MEM_ALLOC, "Failed to allocate string");
     }
     mode->description = SCStrdup(description);
     if (unlikely(mode->description == NULL)) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Failed to allocate string");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_MEM_ALLOC, "Failed to allocate string");
     }
     mode->RunModeFunc = RunModeFunc;
 
@@ -497,7 +502,20 @@ int RunModeOutputFiledataEnabled(void)
     return filedata_logger_count > 0;
 }
 
-bool IsRunModeOffline(int run_mode_to_check)
+bool IsRunModeSystem(enum RunModes run_mode_to_check)
+{
+    switch (run_mode_to_check) {
+        case RUNMODE_PCAP_FILE:
+        case RUNMODE_ERF_FILE:
+        case RUNMODE_ENGINE_ANALYSIS:
+            return false;
+            break;
+        default:
+            return true;
+    }
+}
+
+bool IsRunModeOffline(enum RunModes run_mode_to_check)
 {
     switch(run_mode_to_check) {
         case RUNMODE_CONF_TEST:
@@ -526,6 +544,8 @@ void RunModeShutDown(void)
     OutputStreamingShutdown();
     OutputStatsShutdown();
     OutputFlowShutdown();
+
+    OutputClearActiveLoggers();
 
     /* Reset logger counts. */
     file_logger_count = 0;
@@ -580,7 +600,10 @@ static void SetupOutput(const char *name, OutputModule *module, OutputCtx *outpu
                 module->ts_log_progress, module->TxLogCondition,
                 module->ThreadInit, module->ThreadDeinit,
                 module->ThreadExitPrintStats);
-        logger_bits[module->alproto] |= (1<<module->logger_id);
+        /* Not used with wild card loggers */
+        if (module->alproto != ALPROTO_UNKNOWN) {
+            logger_bits[module->alproto] |= (1<<module->logger_id);
+        }
     } else if (module->FiledataLogFunc) {
         SCLogDebug("%s is a filedata logger", module->name);
         OutputRegisterFiledataLogger(module->logger_id, module->name,
@@ -662,22 +685,6 @@ static void RunModeInitializeEveOutput(ConfNode *conf, OutputCtx *parent_ctx)
         /* Error is no registered loggers with this name
          * were found .*/
         if (!sub_count) {
-#ifndef HAVE_RUST
-            const char *rust_types[] = { "eve-log.smb", "eve-log.nfs",
-                "eve-log.dhcp", "eve-log.krb5", "eve-log.ikev2",
-                "eve-log.tftp", NULL, };
-            const char **iter = rust_types;
-            bool is_rust = false;
-            while (*iter) {
-                is_rust |= (strcmp(*iter, subname) == 0);
-                iter++;
-            }
-            if (is_rust) {
-                SCLogWarning(SC_WARN_RUST_NOT_AVAILABLE, "output "
-                    "module '%s' depends on Rust support", subname);
-                continue;
-            }
-#endif
             FatalErrorOnInit(SC_ERR_INVALID_ARGUMENT,
                     "No output module named %s", subname);
             continue;
@@ -753,12 +760,23 @@ void RunModeInitializeOutputs(void)
             continue;
         }
 
-        if (strncmp(output->val, "unified-", sizeof("unified-") - 1) == 0) {
+        if (strcmp(output->val, "file-log") == 0) {
+            SCLogWarning(SC_ERR_NOT_SUPPORTED,
+                    "file-log is no longer supported,"
+                    " use eve.files instead "
+                    "(see https://redmine.openinfosecfoundation.org/issues/2376"
+                    " for an explanation)");
+            continue;
+        } else if (strncmp(output->val, "unified-", sizeof("unified-") - 1) == 0) {
             SCLogWarning(SC_ERR_NOT_SUPPORTED,
                     "Unified1 is no longer supported,"
                     " use Unified2 instead "
                     "(see https://redmine.openinfosecfoundation.org/issues/353"
                     " for an explanation)");
+            continue;
+        } else if (strncmp(output->val, "unified2-", sizeof("unified2-") - 1) == 0) {
+            SCLogWarning(SC_ERR_NOT_SUPPORTED,
+                    "Unified2 is no longer supported.");
             continue;
         } else if (strcmp(output->val, "alert-prelude") == 0) {
 #ifndef PRELUDE
@@ -766,14 +784,6 @@ void RunModeInitializeOutputs(void)
                     "Prelude support not compiled in. Reconfigure/"
                     "recompile with --enable-prelude to add Prelude "
                     "support.");
-            continue;
-#endif
-        } else if (strcmp(output->val, "eve-log") == 0) {
-#ifndef HAVE_LIBJANSSON
-            SCLogWarning(SC_ERR_NOT_SUPPORTED,
-                    "Eve-log support not compiled in. Reconfigure/"
-                    "recompile with libjansson and its development "
-                    "files installed to add eve-log support.");
             continue;
 #endif
         } else if (strcmp(output->val, "lua") == 0) {
@@ -785,11 +795,9 @@ void RunModeInitializeOutputs(void)
             continue;
 #endif
         } else if (strcmp(output->val, "dns-log") == 0) {
-#ifdef HAVE_RUST
             SCLogWarning(SC_ERR_NOT_SUPPORTED,
-                    "dns-log is not available when Rust is enabled.");
+                    "dns-log is not longer available as of Suricata 5.0");
             continue;
-#endif
         } else if (strcmp(output->val, "tls-log") == 0) {
             tls_log_enabled = 1;
         }
@@ -808,7 +816,7 @@ void RunModeInitializeOutputs(void)
                 OutputInitResult r = module->InitFunc(output_config);
                 if (!r.ok) {
                     FatalErrorOnInit(SC_ERR_INVALID_ARGUMENT,
-                        "output module setup failed");
+                        "output module \"%s\": setup failed", output->val);
                     continue;
                 } else if (r.ctx == NULL) {
                     continue;
@@ -902,6 +910,7 @@ void RunModeInitializeOutputs(void)
             AppLayerParserRegisterLoggerBits(IPPROTO_UDP, a, logger_bits[a]);
 
     }
+    OutputSetupActiveLoggers();
 }
 
 float threading_detect_ratio = 1;

@@ -101,7 +101,7 @@ static void DecodePartialIPV6(Packet *p, uint8_t *partial_packet, uint16_t len )
                 p->icmpv6vars.emb_dport = p->icmpv6vars.emb_tcph->th_dport;
 
                 SCLogDebug("ICMPV6->IPV6->TCP header sport: "
-                           "%"PRIu8" dport %"PRIu8"", p->icmpv6vars.emb_sport,
+                           "%"PRIu16" dport %"PRIu16"", p->icmpv6vars.emb_sport,
                             p->icmpv6vars.emb_dport);
             } else {
                 SCLogDebug("Warning, ICMPV6->IPV6->TCP "
@@ -118,7 +118,7 @@ static void DecodePartialIPV6(Packet *p, uint8_t *partial_packet, uint16_t len )
                 p->icmpv6vars.emb_dport = p->icmpv6vars.emb_udph->uh_dport;
 
                 SCLogDebug("ICMPV6->IPV6->UDP header sport: "
-                           "%"PRIu8" dport %"PRIu8"", p->icmpv6vars.emb_sport,
+                           "%"PRIu16" dport %"PRIu16"", p->icmpv6vars.emb_sport,
                             p->icmpv6vars.emb_dport);
             } else {
                 SCLogDebug("Warning, ICMPV6->IPV6->UDP "
@@ -182,12 +182,11 @@ int ICMPv6GetCounterpart(uint8_t type)
  * \param p Pointer to the packet we are filling
  * \param pkt Pointer to the raw packet buffer
  * \param len the len of the rest of the packet not processed yet
- * \param pq the packet queue were this packet go
  *
  * \retval void No return value
  */
 int DecodeICMPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
-                  uint8_t *pkt, uint32_t len, PacketQueue *pq)
+                 const uint8_t *pkt, uint32_t len)
 {
     int full_hdr = 0;
     StatsIncr(tv, dtv->counter_icmpv6);
@@ -203,7 +202,7 @@ int DecodeICMPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
     p->icmp_s.type = p->icmpv6h->type;
     p->icmp_s.code = p->icmpv6h->code;
     p->payload_len = len - ICMPV6_HEADER_LEN;
-    p->payload = pkt + ICMPV6_HEADER_LEN;
+    p->payload = (uint8_t *)pkt + ICMPV6_HEADER_LEN;
 
     int ctype = ICMPv6GetCounterpart(p->icmp_s.type);
     if (ctype != -1) {
@@ -509,7 +508,7 @@ int DecodeICMPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
     if (!full_hdr) {
         if (p->payload_len >= 4) {
             p->payload_len -= 4;
-            p->payload = pkt + 4;
+            p->payload = (uint8_t *)pkt + 4;
         } else {
             p->payload_len = 0;
             p->payload = NULL;
@@ -625,7 +624,7 @@ static int ICMPV6ParamProbTest01(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(p->icmpv6h == NULL);
 
@@ -681,7 +680,7 @@ static int ICMPV6PktTooBigTest01(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(p->icmpv6h == NULL);
 
@@ -740,7 +739,7 @@ static int ICMPV6TimeExceedTest01(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF_NULL(p->icmpv6h);
 
@@ -799,7 +798,7 @@ static int ICMPV6DestUnreachTest01(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF_NULL(p->icmpv6h);
 
@@ -846,7 +845,7 @@ static int ICMPV6EchoReqTest01(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF_NULL(p->icmpv6h);
 
@@ -892,7 +891,7 @@ static int ICMPV6EchoRepTest01(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF_NULL(p->icmpv6h);
 
@@ -945,7 +944,7 @@ static int ICMPV6ParamProbTest02(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF_NULL(p->icmpv6h);
     FAIL_IF(ICMPV6_GET_TYPE(p) != 4 || ICMPV6_GET_CODE(p) != 0);
@@ -988,7 +987,7 @@ static int ICMPV6PktTooBigTest02(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF_NULL(p->icmpv6h);
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
@@ -1027,7 +1026,7 @@ static int ICMPV6TimeExceedTest02(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_PKT_TOO_SMALL));
 
@@ -1068,7 +1067,7 @@ static int ICMPV6DestUnreachTest02(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_IPV6_TRUNC_PKT));
 
@@ -1105,7 +1104,7 @@ static int ICMPV6EchoReqTest02(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
@@ -1142,7 +1141,7 @@ static int ICMPV6EchoRepTest02(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
@@ -1182,7 +1181,7 @@ static int ICMPV6PayloadTest01(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF_NULL(p->payload);
     FAIL_IF(p->payload_len != 37);
@@ -1216,7 +1215,7 @@ static int ICMPV6RouterSolicitTestKnownCode(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
@@ -1249,7 +1248,7 @@ static int ICMPV6RouterSolicitTestUnknownCode(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
@@ -1282,7 +1281,7 @@ static int ICMPV6RouterAdvertTestKnownCode(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
@@ -1315,7 +1314,7 @@ static int ICMPV6RouterAdvertTestUnknownCode(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
@@ -1348,7 +1347,7 @@ static int ICMPV6NeighbourSolicitTestKnownCode(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
@@ -1381,7 +1380,7 @@ static int ICMPV6NeighbourSolicitTestUnknownCode(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
@@ -1414,7 +1413,7 @@ static int ICMPV6NeighbourAdvertTestKnownCode(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
@@ -1447,7 +1446,7 @@ static int ICMPV6NeighbourAdvertTestUnknownCode(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
@@ -1480,7 +1479,7 @@ static int ICMPV6RedirectTestKnownCode(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
@@ -1513,7 +1512,7 @@ static int ICMPV6RedirectTestUnknownCode(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6), NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
@@ -1563,7 +1562,7 @@ static int ICMPV6CalculateValidChecksumWithFCS(void)
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6 + 14, sizeof(raw_ipv6) - 14, NULL);
+    DecodeIPV6(&tv, &dtv, p, raw_ipv6 + 14, sizeof(raw_ipv6) - 14);
     FAIL_IF_NULL(p->icmpv6h);
 
     uint16_t icmpv6_len = IPV6_GET_RAW_PLEN(p->ip6h) -

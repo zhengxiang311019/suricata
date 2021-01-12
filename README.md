@@ -1,6 +1,8 @@
 Suricata
 ========
 
+[![Fuzzing Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/suricata.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?sort=-opened&can=1&q=proj:suricata)
+
 Introduction
 ------------
 
@@ -64,7 +66,7 @@ Next to these tests, based on the type of code change further tests can be run m
 
 - traffic replay testing (multi-gigabit)
 - large pcap collection processing (multi-terabytes)
-- AFL based fuzz testing (might take multiple days or even weeks)
+- fuzz testing (might take multiple days or even weeks)
 - pcap based performance testing
 - live performance testing
 - various other manual tests based on evaluation of the proposed changes
@@ -107,7 +109,7 @@ A: To assist in the automation of the QA, we're not accepting warnings or errors
 
 __Q: I think your QA test is wrong__
 
-A: If you really think it is, we can discuss how to improve it. But don't come to this conclusion to quickly, more often it's the code that turns out to be wrong.
+A: If you really think it is, we can discuss how to improve it. But don't come to this conclusion too quickly, more often it's the code that turns out to be wrong.
 
 
 __Q: do you require signing of a contributor license agreement?__

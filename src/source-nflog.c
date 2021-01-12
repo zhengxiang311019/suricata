@@ -75,7 +75,7 @@ void ReceiveNFLOGThreadExitStats(ThreadVars *, void *);
 
 TmEcode DecodeNFLOGThreadInit(ThreadVars *, const void *, void **);
 TmEcode DecodeNFLOGThreadDeinit(ThreadVars *tv, void *data);
-TmEcode DecodeNFLOG(ThreadVars *, Packet *, void *, PacketQueue *, PacketQueue *);
+TmEcode DecodeNFLOG(ThreadVars *, Packet *, void *);
 
 static int runmode_workers;
 
@@ -120,7 +120,6 @@ void TmModuleReceiveNFLOGRegister (void)
     tmm_modules[TMM_RECEIVENFLOG].PktAcqBreakLoop = NULL;
     tmm_modules[TMM_RECEIVENFLOG].ThreadExitPrintStats = ReceiveNFLOGThreadExitStats;
     tmm_modules[TMM_RECEIVENFLOG].ThreadDeinit = ReceiveNFLOGThreadDeinit;
-    tmm_modules[TMM_RECEIVENFLOG].RegisterTests = NULL;
     tmm_modules[TMM_RECEIVENFLOG].flags = TM_FLAG_RECEIVE_TM;
 }
 
@@ -134,7 +133,6 @@ void TmModuleDecodeNFLOGRegister (void)
     tmm_modules[TMM_DECODENFLOG].Func = DecodeNFLOG;
     tmm_modules[TMM_DECODENFLOG].ThreadExitPrintStats = NULL;
     tmm_modules[TMM_DECODENFLOG].ThreadDeinit = DecodeNFLOGThreadDeinit;
-    tmm_modules[TMM_DECODENFLOG].RegisterTests = NULL;
     tmm_modules[TMM_DECODENFLOG].flags = TM_FLAG_DECODE_TM;
 }
 
@@ -193,7 +191,6 @@ static int NFLOGCallback(struct nflog_g_handle *gh, struct nfgenmsg *msg,
     (void) SC_ATOMIC_ADD(ntv->livedev->pkts, 1);
 
     if (TmThreadsSlotProcessPkt(ntv->tv, ntv->slot, p) != TM_ECODE_OK) {
-        TmqhOutputPacketpool(ntv->tv, p);
         return -1;
     }
 
@@ -243,12 +240,10 @@ TmEcode ReceiveNFLOGThreadInit(ThreadVars *tv, const void *initdata, void **data
     SCLogDebug("binding netfilter_log as nflog handler for AF_INET and AF_INET6");
 
     if (nflog_bind_pf(ntv->h, AF_INET) < 0) {
-        SCLogError(SC_ERR_NFLOG_BIND, "nflog_bind_pf() for AF_INET failed");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "nflog_bind_pf() for AF_INET failed");
     }
     if (nflog_bind_pf(ntv->h, AF_INET6) < 0) {
-        SCLogError(SC_ERR_NFLOG_BIND, "nflog_bind_pf() for AF_INET6 failed");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "nflog_bind_pf() for AF_INET6 failed");
     }
 
     ntv->gh = nflog_bind_group(ntv->h, ntv->group);
@@ -349,13 +344,11 @@ TmEcode ReceiveNFLOGThreadDeinit(ThreadVars *tv, void *data)
 
     SCLogDebug("closing nflog group %d", ntv->group);
     if (nflog_unbind_pf(ntv->h, AF_INET) < 0) {
-        SCLogError(SC_ERR_NFLOG_UNBIND, "nflog_unbind_pf() for AF_INET failed");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "nflog_unbind_pf() for AF_INET failed");
     }
 
     if (nflog_unbind_pf(ntv->h, AF_INET6) < 0) {
-        SCLogError(SC_ERR_NFLOG_UNBIND, "nflog_unbind_pf() for AF_INET6 failed");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "nflog_unbind_pf() for AF_INET6 failed");
     }
 
     if (ntv->gh) {
@@ -367,6 +360,14 @@ TmEcode ReceiveNFLOGThreadDeinit(ThreadVars *tv, void *data)
         nflog_close(ntv->h);
         ntv->h = NULL;
     }
+
+    if (ntv->data != NULL) {
+        SCFree(ntv->data);
+        ntv->data = NULL;
+    }
+    ntv->datalen = 0;
+
+    SCFree(ntv);
 
     SCReturnInt(TM_ECODE_OK);
 }
@@ -489,11 +490,10 @@ void ReceiveNFLOGThreadExitStats(ThreadVars *tv, void *data)
  * \param tv pointer to ThreadVars
  * \param p pointer to the current packet
  * \param data pointer that gets cast into NFLOGThreadVars for ptv
- * \param pq pointer to the current PacketQueue
  *
  * \retval TM_ECODE_OK is always returned
  */
-TmEcode DecodeNFLOG(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq, PacketQueue *postpq)
+TmEcode DecodeNFLOG(ThreadVars *tv, Packet *p, void *data)
 {
     SCEnter();
     IPV4Hdr *ip4h = (IPV4Hdr *)GET_PKT_DATA(p);
@@ -507,13 +507,13 @@ TmEcode DecodeNFLOG(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq, Pack
             return TM_ECODE_FAILED;
         }
         SCLogDebug("IPv4 packet");
-        DecodeIPV4(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p), pq);
+        DecodeIPV4(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p));
     } else if(IPV6_GET_RAW_VER(ip6h) == 6) {
         if (unlikely(GET_PKT_LEN(p) > USHRT_MAX)) {
             return TM_ECODE_FAILED;
         }
         SCLogDebug("IPv6 packet");
-        DecodeIPV6(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p), pq);
+        DecodeIPV6(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p));
     } else {
         SCLogDebug("packet unsupported by NFLOG, first byte: %02x", *GET_PKT_DATA(p));
     }

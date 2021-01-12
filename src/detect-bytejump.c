@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -31,8 +31,9 @@
 #include "detect-engine.h"
 #include "app-layer.h"
 
-#include "detect-bytejump.h"
+#include "detect-byte.h"
 #include "detect-byte-extract.h"
+#include "detect-bytejump.h"
 #include "detect-content.h"
 #include "detect-uricontent.h"
 
@@ -57,25 +58,29 @@
                      "(?:\\s*,\\s*((?:multiplier|post_offset)\\s+[^\\s,]+|[^\\s,]+))?" \
                      "\\s*$"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
-static int DetectBytejumpMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectBytejumpMatch(DetectEngineThreadCtx *det_ctx,
                         Packet *p, const Signature *s, const SigMatchCtx *ctx);
-static DetectBytejumpData *DetectBytejumpParse(const char *optstr, char **offset);
+static DetectBytejumpData *DetectBytejumpParse(DetectEngineCtx *de_ctx, const char *optstr, char **offset);
 static int DetectBytejumpSetup(DetectEngineCtx *de_ctx, Signature *s, const char *optstr);
-static void DetectBytejumpFree(void *ptr);
+static void DetectBytejumpFree(DetectEngineCtx*, void *ptr);
+#ifdef UNITTESTS
 static void DetectBytejumpRegisterTests(void);
+#endif
 
 void DetectBytejumpRegister (void)
 {
     sigmatch_table[DETECT_BYTEJUMP].name = "byte_jump";
+    sigmatch_table[DETECT_BYTEJUMP].desc = "allow the ability to select a <num of bytes> from an <offset> and move the detection pointer to that position";
+    sigmatch_table[DETECT_BYTEJUMP].url = "/rules/payload-keywords.html#byte-jump";
     sigmatch_table[DETECT_BYTEJUMP].Match = DetectBytejumpMatch;
     sigmatch_table[DETECT_BYTEJUMP].Setup = DetectBytejumpSetup;
     sigmatch_table[DETECT_BYTEJUMP].Free  = DetectBytejumpFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_BYTEJUMP].RegisterTests = DetectBytejumpRegisterTests;
-
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+#endif
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 /** \brief Byte jump match function
@@ -88,14 +93,14 @@ void DetectBytejumpRegister (void)
  *  \retval 0 no match
  */
 int DetectBytejumpDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s,
-                          const SigMatchCtx *ctx, uint8_t *payload, uint32_t payload_len,
-                          uint8_t flags, int32_t offset)
+                          const SigMatchCtx *ctx, const uint8_t *payload, uint32_t payload_len,
+                          uint16_t flags, int32_t offset)
 {
     SCEnter();
 
     const DetectBytejumpData *data = (const DetectBytejumpData *)ctx;
-    uint8_t *ptr = NULL;
-    uint8_t *jumpptr = NULL;
+    const uint8_t *ptr = NULL;
+    const uint8_t *jumpptr = NULL;
     int32_t len = 0;
     uint64_t val = 0;
     int extbytes;
@@ -152,7 +157,7 @@ int DetectBytejumpDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s,
         }
     }
 
-    //printf("VAL: (%" PRIu64 " x %" PRIu32 ") + %d + %" PRId32 "\n", val, data->multiplier, extbytes, data->post_offset);
+    SCLogDebug("VAL: (%" PRIu64 " x %" PRIu32 ") + %d + %" PRId32, val, data->multiplier, extbytes, data->post_offset);
 
     /* Adjust the jump value based on flags */
     val *= data->multiplier;
@@ -166,12 +171,14 @@ int DetectBytejumpDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s,
     /* Calculate the jump location */
     if (flags & DETECT_BYTEJUMP_BEGIN) {
         jumpptr = payload + val;
-        //printf("NEWVAL: payload %p + %ld = %p\n", p->payload, val, jumpptr);
-    }
-    else {
+        SCLogDebug("NEWVAL: payload %p + %" PRIu64 "= %p", payload, val, jumpptr);
+    } else if (flags & DETECT_BYTEJUMP_END) {
+        jumpptr = payload + payload_len + val;
+        SCLogDebug("NEWVAL: payload %p + %" PRIu32 " - %" PRIu64 " = %p", payload, payload_len, val, jumpptr);
+    } else {
         val += extbytes;
         jumpptr = ptr + val;
-        //printf("NEWVAL: ptr %p + %ld = %p\n", ptr, val, jumpptr);
+        SCLogDebug("NEWVAL: ptr %p + %" PRIu64 " = %p", ptr, val, jumpptr);
     }
 
 
@@ -186,7 +193,7 @@ int DetectBytejumpDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s,
 
 #ifdef DEBUG
     if (SCLogDebugEnabled()) {
-        uint8_t *sptr = (flags & DETECT_BYTEJUMP_BEGIN) ? payload : ptr;
+        const uint8_t *sptr = (flags & DETECT_BYTEJUMP_BEGIN) ? payload : ptr;
         SCLogDebug("jumping %" PRId64 " bytes from %p (%08x) to %p (%08x)",
                val, sptr, (int)(sptr - payload),
                jumpptr, (int)(jumpptr - payload));
@@ -199,12 +206,12 @@ int DetectBytejumpDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s,
     SCReturnInt(1);
 }
 
-static int DetectBytejumpMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectBytejumpMatch(DetectEngineThreadCtx *det_ctx,
                         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectBytejumpData *data = (const DetectBytejumpData *)ctx;
-    uint8_t *ptr = NULL;
-    uint8_t *jumpptr = NULL;
+    const uint8_t *ptr = NULL;
+    const uint8_t *jumpptr = NULL;
     uint16_t len = 0;
     uint64_t val = 0;
     int extbytes;
@@ -245,9 +252,9 @@ static int DetectBytejumpMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
     if (data->flags & DETECT_BYTEJUMP_STRING) {
         extbytes = ByteExtractStringUint64(&val, data->base,
                                            data->nbytes, (const char *)ptr);
-        if(extbytes <= 0) {
-            SCLogError(SC_ERR_BYTE_EXTRACT_FAILED,"Error extracting %d bytes "
-                   "of string data: %d", data->nbytes, extbytes);
+        if (extbytes <= 0) {
+            SCLogDebug("error extracting %d bytes of string data: %d",
+                    data->nbytes, extbytes);
             return -1;
         }
     }
@@ -255,8 +262,8 @@ static int DetectBytejumpMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
         int endianness = (data->flags & DETECT_BYTEJUMP_LITTLE) ? BYTE_LITTLE_ENDIAN : BYTE_BIG_ENDIAN;
         extbytes = ByteExtractUint64(&val, endianness, data->nbytes, ptr);
         if (extbytes != data->nbytes) {
-            SCLogError(SC_ERR_BYTE_EXTRACT_FAILED,"Error extracting %d bytes "
-                   "of numeric data: %d", data->nbytes, extbytes);
+            SCLogDebug("error extracting %d bytes of numeric data: %d",
+                    data->nbytes, extbytes);
             return -1;
         }
     }
@@ -295,7 +302,7 @@ static int DetectBytejumpMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
 
 #ifdef DEBUG
     if (SCLogDebugEnabled()) {
-        uint8_t *sptr = (data->flags & DETECT_BYTEJUMP_BEGIN) ? p->payload
+        const uint8_t *sptr = (data->flags & DETECT_BYTEJUMP_BEGIN) ? p->payload
                                                               : ptr;
         SCLogDebug("jumping %" PRId64 " bytes from %p (%08x) to %p (%08x)",
                val, sptr, (int)(sptr - p->payload),
@@ -309,11 +316,10 @@ static int DetectBytejumpMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
     return 1;
 }
 
-static DetectBytejumpData *DetectBytejumpParse(const char *optstr, char **offset)
+static DetectBytejumpData *DetectBytejumpParse(DetectEngineCtx *de_ctx, const char *optstr, char **offset)
 {
     DetectBytejumpData *data = NULL;
     char args[10][64];
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
     int numargs = 0;
@@ -325,8 +331,7 @@ static DetectBytejumpData *DetectBytejumpParse(const char *optstr, char **offset
     memset(args, 0x00, sizeof(args));
 
     /* Execute the regex and populate args with captures. */
-    ret = pcre_exec(parse_regex, parse_regex_study, optstr,
-                    strlen(optstr), 0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, optstr,  0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 2 || ret > 10) {
         SCLogError(SC_ERR_PCRE_PARSE,"parse error, ret %" PRId32
                ", string \"%s\"", ret, optstr);
@@ -391,7 +396,7 @@ static DetectBytejumpData *DetectBytejumpParse(const char *optstr, char **offset
      */
 
     /* Number of bytes */
-    if (ByteExtractStringUint32(&nbytes, 10, strlen(args[0]), args[0]) <= 0) {
+    if (StringParseUint32(&nbytes, 10, strlen(args[0]), args[0]) <= 0) {
         SCLogError(SC_ERR_INVALID_VALUE, "Malformed number of bytes: %s", optstr);
         goto error;
     }
@@ -408,7 +413,7 @@ static DetectBytejumpData *DetectBytejumpParse(const char *optstr, char **offset
         if (*offset == NULL)
             goto error;
     } else {
-        if (ByteExtractStringInt32(&data->offset, 0, strlen(args[1]), args[1]) <= 0) {
+        if (StringParseInt32(&data->offset, 0, strlen(args[1]), args[1]) <= 0) {
             SCLogError(SC_ERR_INVALID_VALUE, "Malformed offset: %s", optstr);
             goto error;
         }
@@ -436,10 +441,12 @@ static DetectBytejumpData *DetectBytejumpParse(const char *optstr, char **offset
             data->flags |= DETECT_BYTEJUMP_LITTLE;
         } else if (strcasecmp("from_beginning", args[i]) == 0) {
             data->flags |= DETECT_BYTEJUMP_BEGIN;
+        } else if (strcasecmp("from_end", args[i]) == 0) {
+            data->flags |= DETECT_BYTEJUMP_END;
         } else if (strcasecmp("align", args[i]) == 0) {
             data->flags |= DETECT_BYTEJUMP_ALIGN;
         } else if (strncasecmp("multiplier ", args[i], 11) == 0) {
-            if (ByteExtractStringUint32(&data->multiplier, 10,
+            if (StringParseUint32(&data->multiplier, 10,
                                         strlen(args[i]) - 11,
                                         args[i] + 11) <= 0)
             {
@@ -447,7 +454,7 @@ static DetectBytejumpData *DetectBytejumpParse(const char *optstr, char **offset
                 goto error;
             }
         } else if (strncasecmp("post_offset ", args[i], 12) == 0) {
-            if (ByteExtractStringInt32(&data->post_offset, 10,
+            if (StringParseInt32(&data->post_offset, 10,
                                        strlen(args[i]) - 12,
                                        args[i] + 12) <= 0)
             {
@@ -460,6 +467,12 @@ static DetectBytejumpData *DetectBytejumpParse(const char *optstr, char **offset
             SCLogError(SC_ERR_INVALID_VALUE, "Unknown option: \"%s\"", args[i]);
             goto error;
         }
+    }
+
+    if ((data->flags & DETECT_BYTEJUMP_END) && (data->flags & DETECT_BYTEJUMP_BEGIN)) {
+        SCLogError(SC_ERR_INVALID_SIGNATURE, "'from_end' and 'from_beginning' "
+                "cannot be used in the same byte_jump statement");
+        goto error;
     }
 
     if (data->flags & DETECT_BYTEJUMP_STRING) {
@@ -499,7 +512,7 @@ error:
         *offset = NULL;
     }
     if (data != NULL)
-        DetectBytejumpFree(data);
+        DetectBytejumpFree(de_ctx, data);
     return NULL;
 }
 
@@ -511,7 +524,7 @@ static int DetectBytejumpSetup(DetectEngineCtx *de_ctx, Signature *s, const char
     char *offset = NULL;
     int ret = -1;
 
-    data = DetectBytejumpParse(optstr, &offset);
+    data = DetectBytejumpParse(de_ctx, optstr, &offset);
     if (data == NULL)
         goto error;
 
@@ -530,7 +543,7 @@ static int DetectBytejumpSetup(DetectEngineCtx *de_ctx, Signature *s, const char
             prev_pm = DetectGetLastSMFromLists(s,
                     DETECT_CONTENT, DETECT_PCRE,
                     DETECT_BYTETEST, DETECT_BYTEJUMP, DETECT_BYTE_EXTRACT,
-                    DETECT_ISDATAAT, -1);
+                    DETECT_ISDATAAT, DETECT_BYTEMATH, -1);
             if (prev_pm == NULL) {
                 sm_list = DETECT_SM_LIST_PMATCH;
             } else {
@@ -549,7 +562,7 @@ static int DetectBytejumpSetup(DetectEngineCtx *de_ctx, Signature *s, const char
         prev_pm = DetectGetLastSMFromLists(s,
                 DETECT_CONTENT, DETECT_PCRE,
                 DETECT_BYTETEST, DETECT_BYTEJUMP, DETECT_BYTE_EXTRACT,
-                DETECT_ISDATAAT, -1);
+                DETECT_ISDATAAT, DETECT_BYTEMATH, -1);
         if (prev_pm == NULL) {
             sm_list = DETECT_SM_LIST_PMATCH;
         } else {
@@ -567,6 +580,7 @@ static int DetectBytejumpSetup(DetectEngineCtx *de_ctx, Signature *s, const char
             (data->flags & DETECT_BYTEJUMP_LITTLE) ||
             (data->flags & DETECT_BYTEJUMP_BIG) ||
             (data->flags & DETECT_BYTEJUMP_BEGIN) ||
+            (data->flags & DETECT_BYTEJUMP_END) ||
             (data->base == DETECT_BYTEJUMP_BASE_DEC) ||
             (data->base == DETECT_BYTEJUMP_BASE_HEX) ||
             (data->base == DETECT_BYTEJUMP_BASE_OCT) ) {
@@ -577,15 +591,16 @@ static int DetectBytejumpSetup(DetectEngineCtx *de_ctx, Signature *s, const char
     }
 
     if (offset != NULL) {
-        SigMatch *bed_sm = DetectByteExtractRetrieveSMVar(offset, s);
-        if (bed_sm == NULL) {
+        DetectByteIndexType index;
+        if (!DetectByteRetrieveSMVar(offset, s, &index)) {
             SCLogError(SC_ERR_INVALID_SIGNATURE, "Unknown byte_extract var "
-                       "seen in byte_jump - %s\n", offset);
+                       "seen in byte_jump - %s", offset);
             goto error;
         }
-        data->offset = ((DetectByteExtractData *)bed_sm->ctx)->local_id;
-        data->flags |= DETECT_BYTEJUMP_OFFSET_BE;
+        data->offset = index;
+        data->flags |= DETECT_CONTENT_OFFSET_VAR;
         SCFree(offset);
+        offset = NULL;
     }
 
     sm = SigMatchAlloc();
@@ -613,7 +628,10 @@ static int DetectBytejumpSetup(DetectEngineCtx *de_ctx, Signature *s, const char
     ret = 0;
     return ret;
  error:
-    DetectBytejumpFree(data);
+    if (offset != NULL) {
+        SCFree(offset);
+    }
+    DetectBytejumpFree(de_ctx, data);
     return ret;
 }
 
@@ -622,7 +640,7 @@ static int DetectBytejumpSetup(DetectEngineCtx *de_ctx, Signature *s, const char
  *
  * \param data pointer to DetectBytejumpData
  */
-static void DetectBytejumpFree(void *ptr)
+static void DetectBytejumpFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     if (ptr == NULL)
         return;
@@ -646,9 +664,9 @@ static int DetectBytejumpTestParse01(void)
 {
     int result = 0;
     DetectBytejumpData *data = NULL;
-    data = DetectBytejumpParse("4,0", NULL);
+    data = DetectBytejumpParse(NULL, "4,0", NULL);
     if (data != NULL) {
-        DetectBytejumpFree(data);
+        DetectBytejumpFree(NULL, data);
         result = 1;
     }
 
@@ -662,7 +680,7 @@ static int DetectBytejumpTestParse02(void)
 {
     int result = 0;
     DetectBytejumpData *data = NULL;
-    data = DetectBytejumpParse("4, 0", NULL);
+    data = DetectBytejumpParse(NULL, "4, 0", NULL);
     if (data != NULL) {
         if (   (data->nbytes == 4)
             && (data->offset == 0)
@@ -673,7 +691,7 @@ static int DetectBytejumpTestParse02(void)
         {
             result = 1;
         }
-        DetectBytejumpFree(data);
+        DetectBytejumpFree(NULL, data);
     }
 
     return result;
@@ -686,7 +704,7 @@ static int DetectBytejumpTestParse03(void)
 {
     int result = 0;
     DetectBytejumpData *data = NULL;
-    data = DetectBytejumpParse(" 4,0 , relative , little, string, "
+    data = DetectBytejumpParse(NULL, " 4,0 , relative , little, string, "
                                "dec, align, from_beginning", NULL);
     if (data != NULL) {
         if (   (data->nbytes == 4)
@@ -702,7 +720,7 @@ static int DetectBytejumpTestParse03(void)
         {
             result = 1;
         }
-        DetectBytejumpFree(data);
+        DetectBytejumpFree(NULL, data);
     }
 
     return result;
@@ -712,13 +730,13 @@ static int DetectBytejumpTestParse03(void)
  * \test DetectBytejumpTestParse04 is a test for setting the optional flags
  *       with parameters
  *
- * \todo This fails becuase we can only have 9 captures and there are 10.
+ * \todo This fails because we can only have 9 captures and there are 10.
  */
 static int DetectBytejumpTestParse04(void)
 {
     int result = 0;
     DetectBytejumpData *data = NULL;
-    data = DetectBytejumpParse(" 4,0 , relative , little, string, "
+    data = DetectBytejumpParse(NULL, " 4,0 , relative , little, string, "
                                "dec, align, from_beginning , "
                                "multiplier 2 , post_offset -16 ", NULL);
     if (data != NULL) {
@@ -735,7 +753,7 @@ static int DetectBytejumpTestParse04(void)
         {
             result = 1;
         }
-        DetectBytejumpFree(data);
+        DetectBytejumpFree(NULL, data);
     }
 
     return result;
@@ -748,7 +766,7 @@ static int DetectBytejumpTestParse05(void)
 {
     int result = 0;
     DetectBytejumpData *data = NULL;
-    data = DetectBytejumpParse(" 4,0 , relative , little, dec, "
+    data = DetectBytejumpParse(NULL, " 4,0 , relative , little, dec, "
                                "align, from_beginning", NULL);
     if (data == NULL) {
         result = 1;
@@ -764,7 +782,7 @@ static int DetectBytejumpTestParse06(void)
 {
     int result = 0;
     DetectBytejumpData *data = NULL;
-    data = DetectBytejumpParse("9, 0", NULL);
+    data = DetectBytejumpParse(NULL, "9, 0", NULL);
     if (data == NULL) {
         result = 1;
     }
@@ -779,7 +797,7 @@ static int DetectBytejumpTestParse07(void)
 {
     int result = 0;
     DetectBytejumpData *data = NULL;
-    data = DetectBytejumpParse("24, 0, string, dec", NULL);
+    data = DetectBytejumpParse(NULL, "24, 0, string, dec", NULL);
     if (data == NULL) {
         result = 1;
     }
@@ -794,7 +812,7 @@ static int DetectBytejumpTestParse08(void)
 {
     int result = 0;
     DetectBytejumpData *data = NULL;
-    data = DetectBytejumpParse("4, 0xffffffffffffffff", NULL);
+    data = DetectBytejumpParse(NULL, "4, 0xffffffffffffffff", NULL);
     if (data == NULL) {
         result = 1;
     }
@@ -813,7 +831,10 @@ static int DetectBytejumpTestParse09(void)
 
     int result = 1;
 
-    s->alproto = ALPROTO_DCERPC;
+    if (DetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0) {
+        SigFree(NULL, s);
+        return 0;
+    }
 
     result &= (DetectBytejumpSetup(NULL, s, "4,0, align, multiplier 2, "
                                    "post_offset -16,dce") == 0);
@@ -831,7 +852,7 @@ static int DetectBytejumpTestParse09(void)
     result &= (DetectBytejumpSetup(NULL, s, "4,0, from_beginning, dce") == -1);
     result &= (s->sm_lists[g_dce_stub_data_buffer_id] == NULL && s->sm_lists[DETECT_SM_LIST_PMATCH] != NULL);
 
-    SigFree(s);
+    SigFree(NULL, s);
     return result;
 }
 
@@ -1088,6 +1109,29 @@ static int DetectBytejumpTestParse12(void)
     return result;
 }
 
+static int DetectBytejumpTestParse13(void)
+{
+    DetectBytejumpData *data = DetectBytejumpParse(NULL,
+            " 4,0 , relative , little, string, dec, " "align, from_end", NULL);
+    FAIL_IF_NULL(data);
+    FAIL_IF_NOT(data->flags & DETECT_BYTEJUMP_END);
+
+    DetectBytejumpFree(NULL, data);
+
+    PASS;
+}
+
+static int DetectBytejumpTestParse14(void)
+{
+    DetectBytejumpData *data = DetectBytejumpParse(NULL,
+            " 4,0 , relative , little, string, dec, "
+            "align, from_beginning, from_end", NULL);
+
+    FAIL_IF_NOT_NULL(data);
+
+    PASS;
+}
+
 /**
  * \test DetectByteJumpTestPacket01 is a test to check matches of
  * byte_jump and byte_jump relative works if the previous keyword is pcre
@@ -1277,15 +1321,32 @@ end:
     return result;
 }
 
-#endif /* UNITTESTS */
+/**
+ * \test check matches of with from_end
+ */
+static int DetectByteJumpTestPacket08 (void)
+{
+    uint8_t *buf = (uint8_t *)"XX04abcdABCD";
+    uint16_t buflen = strlen((char *)buf);
+    Packet *p = UTHBuildPacket((uint8_t *)buf, buflen, IPPROTO_TCP);
 
+    FAIL_IF_NULL(p);
+
+    char sig[] = "alert tcp any any -> any any (content:\"XX\"; byte_jump:2,0,"
+        "relative,string,dec,from_end, post_offset -8; content:\"ABCD\";  sid:1; rev:1;)";
+
+    FAIL_IF_NOT(UTHPacketMatchSig(p, sig));
+
+    UTHFreePacket(p);
+
+    PASS;
+}
 
 /**
  * \brief this function registers unit tests for DetectBytejump
  */
 static void DetectBytejumpRegisterTests(void)
 {
-#ifdef UNITTESTS
     g_file_data_buffer_id = DetectBufferTypeGetByName("file_data");
     g_dce_stub_data_buffer_id = DetectBufferTypeGetByName("dce_stub_data");
 
@@ -1301,6 +1362,8 @@ static void DetectBytejumpRegisterTests(void)
     UtRegisterTest("DetectBytejumpTestParse10", DetectBytejumpTestParse10);
     UtRegisterTest("DetectBytejumpTestParse11", DetectBytejumpTestParse11);
     UtRegisterTest("DetectBytejumpTestParse12", DetectBytejumpTestParse12);
+    UtRegisterTest("DetectBytejumpTestParse13", DetectBytejumpTestParse13);
+    UtRegisterTest("DetectBytejumpTestParse14", DetectBytejumpTestParse14);
 
     UtRegisterTest("DetectByteJumpTestPacket01", DetectByteJumpTestPacket01);
     UtRegisterTest("DetectByteJumpTestPacket02", DetectByteJumpTestPacket02);
@@ -1309,6 +1372,6 @@ static void DetectBytejumpRegisterTests(void)
     UtRegisterTest("DetectByteJumpTestPacket05", DetectByteJumpTestPacket05);
     UtRegisterTest("DetectByteJumpTestPacket06", DetectByteJumpTestPacket06);
     UtRegisterTest("DetectByteJumpTestPacket07", DetectByteJumpTestPacket07);
-#endif /* UNITTESTS */
+    UtRegisterTest("DetectByteJumpTestPacket08", DetectByteJumpTestPacket08);
 }
-
+#endif /* UNITTESTS */

@@ -17,17 +17,16 @@
 
 // This file exposes items from the core "C" code to Rust.
 
-extern crate libc;
-
-use filecontainer::*;
+use std;
+use crate::filecontainer::*;
 
 /// Opaque C types.
-pub enum Flow {}
 pub enum DetectEngineState {}
 pub enum AppLayerDecoderEvents {}
+pub enum AppLayerParserState {}
 
 // From app-layer-events.h
-pub type AppLayerEventType = libc::c_int;
+pub type AppLayerEventType = std::os::raw::c_int;
 pub const APP_LAYER_EVENT_TYPE_TRANSACTION : i32 = 1;
 pub const APP_LAYER_EVENT_TYPE_PACKET      : i32 = 2;
 
@@ -41,10 +40,17 @@ pub const STREAM_DEPTH:    u8 = 0x20;
 pub const STREAM_MIDSTREAM:u8 = 0x40;
 
 // Application layer protocol identifiers (app-layer-protos.h)
-pub type AppProto = libc::c_int;
+pub type AppProto = std::os::raw::c_int;
 
 pub const ALPROTO_UNKNOWN : AppProto = 0;
 pub static mut ALPROTO_FAILED : AppProto = 0; // updated during init
+
+pub const IPPROTO_TCP : i32 = 6;
+pub const IPPROTO_UDP : i32 = 17;
+
+macro_rules!BIT_U32 {
+    ($x:expr) => (1 << $x);
+}
 
 macro_rules!BIT_U64 {
     ($x:expr) => (1 << $x);
@@ -61,24 +67,24 @@ extern {
 
 #[allow(non_snake_case)]
 pub type SCLogMessageFunc =
-    extern "C" fn(level: libc::c_int,
-                  filename: *const libc::c_char,
-                  line: libc::c_uint,
-                  function: *const libc::c_char,
-                  code: libc::c_int,
-                  message: *const libc::c_char) -> libc::c_int;
+    extern "C" fn(level: std::os::raw::c_int,
+                  filename: *const std::os::raw::c_char,
+                  line: std::os::raw::c_uint,
+                  function: *const std::os::raw::c_char,
+                  code: std::os::raw::c_int,
+                  message: *const std::os::raw::c_char) -> std::os::raw::c_int;
 
 pub type DetectEngineStateFreeFunc =
     extern "C" fn(state: *mut DetectEngineState);
 
 pub type AppLayerDecoderEventsSetEventRawFunc =
     extern "C" fn (events: *mut *mut AppLayerDecoderEvents,
-                   event: libc::uint8_t);
+                   event: u8);
 
 pub type AppLayerDecoderEventsFreeEventsFunc =
     extern "C" fn (events: *mut *mut AppLayerDecoderEvents);
 
-pub struct SuricataStreamingBufferConfig;
+pub enum SuricataStreamingBufferConfig {}
 
 pub type SCFileOpenFileWithId = extern "C" fn (
         file_container: &FileContainer,
@@ -139,15 +145,25 @@ pub struct SuricataFileContext {
     pub files_sbcfg: &'static SuricataStreamingBufferConfig,
 }
 
+extern {
+    pub fn SCGetContext() -> &'static mut SuricataContext;
+    pub fn SCLogGetLogLevel() -> i32;
+}
+
 pub static mut SC: Option<&'static SuricataContext> = None;
 
-#[no_mangle]
-pub extern "C" fn rs_init(context: &'static mut SuricataContext)
+pub fn init_ffi(context: &'static mut SuricataContext)
 {
     unsafe {
         SC = Some(context);
         ALPROTO_FAILED = StringToAppProto("failed\0".as_ptr());
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rs_init(context: &'static mut SuricataContext)
+{
+    init_ffi(context);
 }
 
 /// DetectEngineStateFree wrapper.
@@ -162,7 +178,7 @@ pub fn sc_detect_engine_state_free(state: *mut DetectEngineState)
 
 /// AppLayerDecoderEventsSetEventRaw wrapper.
 pub fn sc_app_layer_decoder_events_set_event_raw(
-    events: *mut *mut AppLayerDecoderEvents, event: libc::uint8_t)
+    events: *mut *mut AppLayerDecoderEvents, event: u8)
 {
     unsafe {
         if let Some(c) = SC {
@@ -178,6 +194,29 @@ pub fn sc_app_layer_decoder_events_free_events(
     unsafe {
         if let Some(c) = SC {
             (c.AppLayerDecoderEventsFreeEvents)(events);
+        }
+    }
+}
+
+/// Opaque flow type (defined in C)
+pub enum Flow {}
+
+/// Extern functions operating on Flow.
+extern {
+    pub fn FlowGetLastTimeAsParts(flow: &Flow, secs: *mut u64, usecs: *mut u64);
+}
+
+/// Rust implementation of Flow.
+impl Flow {
+
+    /// Return the time of the last flow update as a `Duration`
+    /// since the epoch.
+    pub fn get_last_time(&mut self) -> std::time::Duration {
+        unsafe {
+            let mut secs: u64 = 0;
+            let mut usecs: u64 = 0;
+            FlowGetLastTimeAsParts(self, &mut secs, &mut usecs);
+            std::time::Duration::new(secs, usecs as u32 * 1000)
         }
     }
 }

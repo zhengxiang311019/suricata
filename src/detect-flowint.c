@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2014 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -50,26 +50,28 @@
 #define PARSE_REGEX "^\\s*([a-zA-Z][\\w\\d_./]+)\\s*,\\s*([+=-]{1}|==|!=|<|<=|>|>=|isset|notset)\\s*,?\\s*([a-zA-Z][\\w\\d]+|[\\d]{1,10})?\\s*$"
 /* Varnames must begin with a letter */
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
-int DetectFlowintMatch(ThreadVars *, DetectEngineThreadCtx *, Packet *,
+int DetectFlowintMatch(DetectEngineThreadCtx *, Packet *,
                        const Signature *, const SigMatchCtx *);
 static int DetectFlowintSetup(DetectEngineCtx *, Signature *, const char *);
-void DetectFlowintFree(void *);
-void DetectFlowintRegisterTests(void);
+void DetectFlowintFree(DetectEngineCtx *, void *);
+#ifdef UNITTESTS
+static void DetectFlowintRegisterTests(void);
+#endif
 
 void DetectFlowintRegister(void)
 {
     sigmatch_table[DETECT_FLOWINT].name = "flowint";
     sigmatch_table[DETECT_FLOWINT].desc = "operate on a per-flow integer";
-    sigmatch_table[DETECT_FLOWINT].url = DOC_URL DOC_VERSION "/rules/flowint.html";
+    sigmatch_table[DETECT_FLOWINT].url = "/rules/flow-keywords.html#flowint";
     sigmatch_table[DETECT_FLOWINT].Match = DetectFlowintMatch;
     sigmatch_table[DETECT_FLOWINT].Setup = DetectFlowintSetup;
     sigmatch_table[DETECT_FLOWINT].Free = DetectFlowintFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_FLOWINT].RegisterTests = DetectFlowintRegisterTests;
-
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+#endif
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 /**
@@ -86,7 +88,7 @@ void DetectFlowintRegister(void)
  * \retval 1 match, when a var is initialized well, add/substracted, or a true
  * condition
  */
-int DetectFlowintMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+int DetectFlowintMatch(DetectEngineThreadCtx *det_ctx,
                         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectFlowintData *sfd = (const DetectFlowintData *)ctx;
@@ -119,7 +121,7 @@ int DetectFlowintMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
         targetval = sfd->target.value;
     }
 
-    SCLogDebug("Our var %s is at idx: %"PRIu16"", sfd->name, sfd->idx);
+    SCLogDebug("Our var %s is at idx: %"PRIu32"", sfd->name, sfd->idx);
 
     if (sfd->modifier == FLOWINT_MODIFIER_SET) {
         FlowVarAddIntNoLock(p->flow, sfd->idx, targetval);
@@ -227,15 +229,13 @@ static DetectFlowintData *DetectFlowintParse(DetectEngineCtx *de_ctx, const char
     char *varname = NULL;
     char *varval = NULL;
     char *modstr = NULL;
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
     uint8_t modifier = FLOWINT_MODIFIER_UNKNOWN;
     unsigned long long value_long = 0;
     const char *str_ptr;
 
-    ret = pcre_exec(parse_regex, parse_regex_study, rawstr, strlen(rawstr),
-                     0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, rawstr, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 3 || ret > 4) {
         SCLogError(SC_ERR_PCRE_MATCH, "\"%s\" is not a valid setting for flowint(ret = %d).", rawstr, ret);
         return NULL;
@@ -403,7 +403,7 @@ static int DetectFlowintSetup(DetectEngineCtx *de_ctx, Signature *s, const char 
 
 error:
     if (sfd)
-        DetectFlowintFree(sfd);
+        DetectFlowintFree(de_ctx, sfd);
     if (sm)
         SCFree(sm);
     return -1;
@@ -412,7 +412,7 @@ error:
 /**
  * \brief This function is used to free the data of DetectFlowintData
  */
-void DetectFlowintFree(void *tmp)
+void DetectFlowintFree(DetectEngineCtx *de_ctx, void *tmp)
 {
     DetectFlowintData *sfd =(DetectFlowintData*) tmp;
     if (sfd != NULL) {
@@ -436,7 +436,7 @@ static void DetectFlowintPrintData(DetectFlowintData *sfd)
         return;
     }
 
-    SCLogDebug("Varname: %s, modifier: %"PRIu8", idx: %"PRIu16" Target: ",
+    SCLogDebug("Varname: %s, modifier: %"PRIu8", idx: %"PRIu32" Target: ",
                 sfd->name, sfd->modifier, sfd->idx);
     switch(sfd->targettype) {
         case FLOWINT_TARGET_VAR:
@@ -471,7 +471,7 @@ static int DetectFlowintTestParseVal01(void)
             && sfd->modifier == FLOWINT_MODIFIER_SET) {
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     DetectEngineCtxFree(de_ctx);
 
@@ -502,7 +502,7 @@ static int DetectFlowintTestParseVar01(void)
 
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
     DetectEngineCtxFree(de_ctx);
 
     return result;
@@ -528,7 +528,7 @@ static int DetectFlowintTestParseVal02(void)
             && sfd->modifier == FLOWINT_MODIFIER_ADD) {
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     DetectEngineCtxFree(de_ctx);
 
@@ -559,7 +559,7 @@ static int DetectFlowintTestParseVar02(void)
 
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
     DetectEngineCtxFree(de_ctx);
 
     return result;
@@ -585,7 +585,7 @@ static int DetectFlowintTestParseVal03(void)
             && sfd->modifier == FLOWINT_MODIFIER_SUB) {
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     DetectEngineCtxFree(de_ctx);
 
@@ -616,7 +616,7 @@ static int DetectFlowintTestParseVar03(void)
 
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
     DetectEngineCtxFree(de_ctx);
 
     return result;
@@ -643,7 +643,7 @@ static int DetectFlowintTestParseVal04(void)
             && sfd->modifier == FLOWINT_MODIFIER_EQ) {
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     DetectEngineCtxFree(de_ctx);
 
@@ -674,7 +674,7 @@ static int DetectFlowintTestParseVar04(void)
 
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
     DetectEngineCtxFree(de_ctx);
 
     return result;
@@ -700,7 +700,7 @@ static int DetectFlowintTestParseVal05(void)
             && sfd->modifier == FLOWINT_MODIFIER_NE) {
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     DetectEngineCtxFree(de_ctx);
 
@@ -731,7 +731,7 @@ static int DetectFlowintTestParseVar05(void)
 
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
     DetectEngineCtxFree(de_ctx);
 
     return result;
@@ -757,7 +757,7 @@ static int DetectFlowintTestParseVal06(void)
             && sfd->modifier == FLOWINT_MODIFIER_GT) {
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     DetectEngineCtxFree(de_ctx);
 
@@ -788,7 +788,7 @@ static int DetectFlowintTestParseVar06(void)
 
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
     DetectEngineCtxFree(de_ctx);
 
     return result;
@@ -814,7 +814,7 @@ static int DetectFlowintTestParseVal07(void)
             && sfd->modifier == FLOWINT_MODIFIER_GE) {
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     DetectEngineCtxFree(de_ctx);
 
@@ -845,7 +845,7 @@ static int DetectFlowintTestParseVar07(void)
 
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
     DetectEngineCtxFree(de_ctx);
 
     return result;
@@ -871,7 +871,7 @@ static int DetectFlowintTestParseVal08(void)
             && sfd->modifier == FLOWINT_MODIFIER_LE) {
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     DetectEngineCtxFree(de_ctx);
 
@@ -902,7 +902,7 @@ static int DetectFlowintTestParseVar08(void)
 
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
     DetectEngineCtxFree(de_ctx);
 
     return result;
@@ -928,7 +928,7 @@ static int DetectFlowintTestParseVal09(void)
             && sfd->modifier == FLOWINT_MODIFIER_LT) {
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     DetectEngineCtxFree(de_ctx);
 
@@ -959,7 +959,7 @@ static int DetectFlowintTestParseVar09(void)
 
         result = 1;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
     DetectEngineCtxFree(de_ctx);
 
     return result;
@@ -990,7 +990,7 @@ static int DetectFlowintTestParseIsset10(void)
         result = 0;
     }
 
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
     sfd = DetectFlowintParse(de_ctx, "myvar, notset");
     DetectFlowintPrintData(sfd);
     if (sfd != NULL && !strcmp(sfd->name, "myvar")
@@ -1002,7 +1002,7 @@ static int DetectFlowintTestParseIsset10(void)
         result = 0;
     }
 
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
     DetectEngineCtxFree(de_ctx);
 
     return result;
@@ -1027,56 +1027,56 @@ static int DetectFlowintTestParseInvalidSyntaxis01(void)
         SCLogDebug("DetectFlowintTestParseInvalidSyntaxis01: ERROR: invalid option at myvar,=,9532458716234857");
         result = 0;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     sfd = DetectFlowintParse(de_ctx, "myvar,=,45targetvar");
     if (sfd != NULL) {
         SCLogDebug("DetectFlowintTestParseInvalidSyntaxis01: ERROR: invalid option at myvar,=,45targetvar ");
         result = 0;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     sfd = DetectFlowintParse(de_ctx, "657myvar,=,targetvar");
     if (sfd != NULL) {
         SCLogDebug("DetectFlowintTestParseInvalidSyntaxis01: ERROR: invalid option at 657myvar,=,targetvar ");
         result = 0;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     sfd = DetectFlowintParse(de_ctx, "myvar,=<,targetvar");
     if (sfd != NULL) {
         SCLogDebug("DetectFlowintTestParseInvalidSyntaxis01: ERROR: invalid option at myvar,=<,targetvar ");
         result = 0;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     sfd = DetectFlowintParse(de_ctx, "myvar,===,targetvar");
     if (sfd != NULL) {
         SCLogDebug("DetectFlowintTestParseInvalidSyntaxis01: ERROR: invalid option at myvar,===,targetvar ");
         result = 0;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     sfd = DetectFlowintParse(de_ctx, "myvar,==");
     if (sfd != NULL) {
         SCLogDebug("DetectFlowintTestParseInvalidSyntaxis01: ERROR: invalid option at myvar,==");
         result = 0;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     sfd = DetectFlowintParse(de_ctx, "myvar,");
     if (sfd != NULL) {
         SCLogDebug("DetectFlowintTestParseInvalidSyntaxis01: ERROR: invalid option at myvar,");
         result = 0;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     sfd = DetectFlowintParse(de_ctx, "myvar");
     if (sfd != NULL) {
         SCLogDebug("DetectFlowintTestParseInvalidSyntaxis01: ERROR: invalid option at myvar");
         result = 0;
     }
-    if (sfd) DetectFlowintFree(sfd);
+    if (sfd) DetectFlowintFree(NULL, sfd);
 
     DetectEngineCtxFree(de_ctx);
 
@@ -1303,14 +1303,11 @@ static int DetectFlowintTestPacket03Real(void)
     PASS;
 }
 
-#endif /* UNITTESTS */
-
 /**
  * \brief this function registers unit tests for DetectFlowint
  */
 void DetectFlowintRegisterTests(void)
 {
-#ifdef UNITTESTS /* UNITTESTS */
     UtRegisterTest("DetectFlowintTestParseVal01", DetectFlowintTestParseVal01);
     UtRegisterTest("DetectFlowintTestParseVar01", DetectFlowintTestParseVar01);
     UtRegisterTest("DetectFlowintTestParseVal02", DetectFlowintTestParseVal02);
@@ -1339,5 +1336,5 @@ void DetectFlowintRegisterTests(void)
                    DetectFlowintTestPacket02Real);
     UtRegisterTest("DetectFlowintTestPacket03Real",
                    DetectFlowintTestPacket03Real);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

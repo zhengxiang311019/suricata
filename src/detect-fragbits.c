@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2016 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -65,16 +65,18 @@
 #define FRAGBITS_HAVE_DF    0x02
 #define FRAGBITS_HAVE_RF    0x04
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
-static int DetectFragBitsMatch (ThreadVars *, DetectEngineThreadCtx *, Packet *,
+static int DetectFragBitsMatch (DetectEngineThreadCtx *, Packet *,
         const Signature *, const SigMatchCtx *);
 static int DetectFragBitsSetup (DetectEngineCtx *, Signature *, const char *);
-static void DetectFragBitsFree(void *);
+static void DetectFragBitsFree(DetectEngineCtx *, void *);
 
 static int PrefilterSetupFragBits(DetectEngineCtx *de_ctx, SigGroupHead *sgh);
-static _Bool PrefilterFragBitsIsPrefilterable(const Signature *s);
+static bool PrefilterFragBitsIsPrefilterable(const Signature *s);
+#ifdef UNITTESTS
+static void FragBitsRegisterTests(void);
+#endif
 
 /**
  * \brief Registration function for fragbits: keyword
@@ -84,16 +86,17 @@ void DetectFragBitsRegister (void)
 {
     sigmatch_table[DETECT_FRAGBITS].name = "fragbits";
     sigmatch_table[DETECT_FRAGBITS].desc = "check if the fragmentation and reserved bits are set in the IP header";
-    sigmatch_table[DETECT_FRAGBITS].url = DOC_URL DOC_VERSION "/rules/header-keywords.html#fragbits";
+    sigmatch_table[DETECT_FRAGBITS].url = "/rules/header-keywords.html#fragbits-ip-fragmentation";
     sigmatch_table[DETECT_FRAGBITS].Match = DetectFragBitsMatch;
     sigmatch_table[DETECT_FRAGBITS].Setup = DetectFragBitsSetup;
     sigmatch_table[DETECT_FRAGBITS].Free  = DetectFragBitsFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_FRAGBITS].RegisterTests = FragBitsRegisterTests;
-
+#endif
     sigmatch_table[DETECT_FRAGBITS].SetupPrefilter = PrefilterSetupFragBits;
     sigmatch_table[DETECT_FRAGBITS].SupportsPrefilter = PrefilterFragBitsIsPrefilterable;
 
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 static inline int
@@ -136,7 +139,7 @@ FragBitsMatch(const uint8_t pbits, const uint8_t modifier,
  * \retval 0 no match
  * \retval 1 match
  */
-static int DetectFragBitsMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectFragBitsMatch (DetectEngineThreadCtx *det_ctx,
         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
     if (!ctx || !PKT_IS_IPV4(p) || PKT_IS_PSEUDOPKT(p))
@@ -166,7 +169,6 @@ static int DetectFragBitsMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx,
 static DetectFragBitsData *DetectFragBitsParse (const char *rawstr)
 {
     DetectFragBitsData *de = NULL;
-#define MAX_SUBSTRINGS 30
     int ret = 0, found = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
     const char *str_ptr = NULL;
@@ -174,7 +176,7 @@ static DetectFragBitsData *DetectFragBitsParse (const char *rawstr)
     char *ptr;
     int i;
 
-    ret = pcre_exec(parse_regex, parse_regex_study, rawstr, strlen(rawstr), 0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, rawstr, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 1) {
         SCLogError(SC_ERR_PCRE_MATCH, "pcre_exec parse error, ret %" PRId32 ", string %s", ret, rawstr);
         goto error;
@@ -310,7 +312,7 @@ error:
  *
  * \param de pointer to DetectFragBitsData
  */
-static void DetectFragBitsFree(void *de_ptr)
+static void DetectFragBitsFree(DetectEngineCtx *de_ctx, void *de_ptr)
 {
     DetectFragBitsData *de = (DetectFragBitsData *)de_ptr;
     if(de) SCFree(de);
@@ -346,7 +348,7 @@ PrefilterPacketFragBitsSet(PrefilterPacketHeaderValue *v, void *smctx)
     v->u8[1] = fb->fragbits;
 }
 
-static _Bool
+static bool
 PrefilterPacketFragBitsCompare(PrefilterPacketHeaderValue v, void *smctx)
 {
     const DetectFragBitsData *fb = smctx;
@@ -366,7 +368,7 @@ static int PrefilterSetupFragBits(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
         PrefilterPacketFragBitsMatch);
 }
 
-static _Bool PrefilterFragBitsIsPrefilterable(const Signature *s)
+static bool PrefilterFragBitsIsPrefilterable(const Signature *s)
 {
     const SigMatch *sm;
     for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
@@ -394,7 +396,7 @@ static int FragBitsTestParse01 (void)
     DetectFragBitsData *de = NULL;
     de = DetectFragBitsParse("M");
     if (de && (de->fragbits == FRAGBITS_HAVE_MF) ) {
-        DetectFragBitsFree(de);
+        DetectFragBitsFree(NULL, de);
         return 1;
     }
 
@@ -412,7 +414,7 @@ static int FragBitsTestParse02 (void)
     DetectFragBitsData *de = NULL;
     de = DetectFragBitsParse("G");
     if (de) {
-        DetectFragBitsFree(de);
+        DetectFragBitsFree(NULL, de);
         return 0;
     }
 
@@ -484,7 +486,7 @@ static int FragBitsTestParse03 (void)
 
     FlowInitConfig(FLOW_QUIET);
 
-    DecodeEthernet(&tv, &dtv, p, raw_eth, sizeof(raw_eth), NULL);
+    DecodeEthernet(&tv, &dtv, p, raw_eth, sizeof(raw_eth));
 
     de = DetectFragBitsParse("D");
 
@@ -496,7 +498,7 @@ static int FragBitsTestParse03 (void)
     sm->type = DETECT_FRAGBITS;
     sm->ctx = (SigMatchCtx *)de;
 
-    ret = DetectFragBitsMatch(&tv, NULL, p, NULL, sm->ctx);
+    ret = DetectFragBitsMatch(NULL, p, NULL, sm->ctx);
     FAIL_IF(ret == 0);
 
     FlowShutdown();
@@ -571,7 +573,7 @@ static int FragBitsTestParse04 (void)
 
     FlowInitConfig(FLOW_QUIET);
 
-    DecodeEthernet(&tv, &dtv, p, raw_eth, sizeof(raw_eth), NULL);
+    DecodeEthernet(&tv, &dtv, p, raw_eth, sizeof(raw_eth));
 
 
     de = DetectFragBitsParse("!D");
@@ -586,7 +588,7 @@ static int FragBitsTestParse04 (void)
     sm->type = DETECT_FRAGBITS;
     sm->ctx = (SigMatchCtx *)de;
 
-    ret = DetectFragBitsMatch(&tv, NULL, p, NULL, sm->ctx);
+    ret = DetectFragBitsMatch(NULL, p, NULL, sm->ctx);
     FAIL_IF(ret);
     SCFree(de);
     SCFree(sm);
@@ -595,17 +597,15 @@ static int FragBitsTestParse04 (void)
     SCFree(p);
     PASS;
 }
-#endif /* UNITTESTS */
 
 /**
  * \brief this function registers unit tests for FragBits
  */
-void FragBitsRegisterTests(void)
+static void FragBitsRegisterTests(void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("FragBitsTestParse01", FragBitsTestParse01);
     UtRegisterTest("FragBitsTestParse02", FragBitsTestParse02);
     UtRegisterTest("FragBitsTestParse03", FragBitsTestParse03);
     UtRegisterTest("FragBitsTestParse04", FragBitsTestParse04);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

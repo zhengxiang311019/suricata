@@ -23,9 +23,7 @@ from __future__ import print_function
 
 import sys
 import re
-from cStringIO import StringIO
 import yaml
-import types
 
 import jinja2
 
@@ -157,10 +155,9 @@ output_json_dnp3_objects_template = """/* Copyright (C) 2015 Open Information Se
 #include "app-layer-dnp3.h"
 #include "app-layer-dnp3-objects.h"
 #include "output-json-dnp3-objects.h"
+#include "output-json.h"
 
-#ifdef HAVE_LIBJANSSON
-
-void OutputJsonDNP3SetItem(json_t *js, DNP3Object *object,
+void OutputJsonDNP3SetItem(JsonBuilder *js, DNP3Object *object,
     DNP3Point *point)
 {
 
@@ -170,20 +167,17 @@ void OutputJsonDNP3SetItem(json_t *js, DNP3Object *object,
             DNP3ObjectG{{object.group}}V{{object.variation}} *data = point->data;
 {% for field in object.fields %}
 {% if is_integer_type(field.type) %}
-            json_object_set_new(js, "{{field.name}}",
-                json_integer(data->{{field.name}}));
+            jb_set_uint(js, "{{field.name}}", data->{{field.name}});
 {% elif field.type in ["flt32", "flt64"] %}
-            json_object_set_new(js, "{{field.name}}",
-                json_real(data->{{field.name}}));
+            jb_set_float(js, "{{field.name}}", data->{{field.name}});
 {% elif field.type == "bytearray" %}
             unsigned long {{field.name}}_b64_len = data->{{field.len_field}} * 2;
             uint8_t {{field.name}}_b64[{{field.name}}_b64_len];
             Base64Encode(data->{{field.name}}, data->{{field.len_field}},
                 {{field.name}}_b64, &{{field.name}}_b64_len);
-            json_object_set_new(js, "data->{{field.name}}",
-                json_string((char *){{field.name}}_b64));
+            jb_set_string(js, "data->{{field.name}}", (char *){{field.name}}_b64);
 {% elif field.type == "vstr4" %}
-            json_object_set_new(js, "data->{{field.name}}", json_string(data->{{field.name}}));
+            jb_set_string(js, "data->{{field.name}}", data->{{field.name}});
 {% elif field.type == "chararray" %}
             if (data->{{field.len_field}} > 0) {
                 /* First create a null terminated string as not all versions
@@ -191,14 +185,13 @@ void OutputJsonDNP3SetItem(json_t *js, DNP3Object *object,
                 char tmpbuf[data->{{field.len_field}} + 1];
                 memcpy(tmpbuf, data->{{field.name}}, data->{{field.len_field}});
                 tmpbuf[data->{{field.len_field}}] = '\\0';
-                json_object_set_new(js, "{{field.name}}", json_string(tmpbuf));
+                jb_set_string(js, "{{field.name}}", tmpbuf);
             } else {
-                json_object_set_new(js, "{{field.name}}", json_string(""));
+                jb_set_string(js, "{{field.name}}", "");
             }
 {% elif field.type == "bstr8" %}
 {% for field in field.fields %}
-            json_object_set_new(js, "{{field.name}}",
-                json_integer(data->{{field.name}}));
+            jb_set_uint(js, "{{field.name}}", data->{{field.name}});
 {% endfor %}
 {% else %}
 {{ raise("Unhandled datatype: %s" % (field.type)) }}
@@ -214,8 +207,6 @@ void OutputJsonDNP3SetItem(json_t *js, DNP3Object *object,
     }
 
 }
-
-#endif /* HAVE_LIBJANSSON */
 
 """
 
@@ -363,15 +354,15 @@ static int DNP3DecodeObjectG{{object.group}}V{{object.variation}}(const uint8_t 
     DNP3PointList *points)
 {
     DNP3ObjectG{{object.group}}V{{object.variation}} *object = NULL;
-    int bytes = (count / 8) + 1;
+    uint32_t bytes = (count / 8) + 1;
     uint32_t prefix = 0;
-    int point_index = start;
+    uint32_t point_index = start;
 
     if (!DNP3ReadPrefix(buf, len, prefix_code, &prefix)) {
         goto error;
     }
 
-    for (int i = 0; i < bytes; i++) {
+    for (uint32_t i = 0; i < bytes; i++) {
 
         uint8_t octet;
 
@@ -441,6 +432,9 @@ static int DNP3DecodeObjectG{{object.group}}V{{object.variation}}(const uint8_t 
 {% endfor %}
 {% endif %}
 
+    if (*len < count/8) {
+        goto error;
+    }
     while (count--) {
 
         object = SCCalloc(1, sizeof(*object));
@@ -575,6 +569,13 @@ static int DNP3DecodeObjectG{{object.group}}V{{object.variation}}(const uint8_t 
     return 1;
 error:
     if (object != NULL) {
+{% for field in object.fields %}
+{% if field.type == "bytearray" %}
+        if (object->{{field.name}} != NULL) {
+            SCFree(object->{{field.name}});
+        }
+{% endif %}
+{% endfor %}
         SCFree(object);
     }
 

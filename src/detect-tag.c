@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -54,14 +54,15 @@ SC_ATOMIC_EXTERN(unsigned int, num_tags);
 /* format: tag: <type>, <count>, <metric>, [direction]; */
 #define PARSE_REGEX  "^\\s*(host|session)\\s*(,\\s*(\\d+)\\s*,\\s*(packets|bytes|seconds)\\s*(,\\s*(src|dst))?\\s*)?$"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
-static int DetectTagMatch(ThreadVars *, DetectEngineThreadCtx *, Packet *,
+static int DetectTagMatch(DetectEngineThreadCtx *, Packet *,
         const Signature *, const SigMatchCtx *);
 static int DetectTagSetup(DetectEngineCtx *, Signature *, const char *);
-void DetectTagRegisterTests(void);
-void DetectTagDataFree(void *);
+#ifdef UNITTESTS
+static void DetectTagRegisterTests(void);
+#endif
+void DetectTagDataFree(DetectEngineCtx *, void *);
 
 /**
  * \brief Registration function for keyword tag
@@ -72,10 +73,12 @@ void DetectTagRegister(void)
     sigmatch_table[DETECT_TAG].Match = DetectTagMatch;
     sigmatch_table[DETECT_TAG].Setup = DetectTagSetup;
     sigmatch_table[DETECT_TAG].Free  = DetectTagDataFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_TAG].RegisterTests = DetectTagRegisterTests;
+#endif
     sigmatch_table[DETECT_TAG].flags |= SIGMATCH_IPONLY_COMPAT;
 
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 /**
@@ -89,7 +92,7 @@ void DetectTagRegister(void)
  * \retval 0 no match
  * \retval 1 match
  */
-static int DetectTagMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx, Packet *p,
+static int DetectTagMatch(DetectEngineThreadCtx *det_ctx, Packet *p,
         const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectTagData *td = (const DetectTagData *)ctx;
@@ -154,12 +157,11 @@ static int DetectTagMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx, Packet 
 static DetectTagData *DetectTagParse(const char *tagstr)
 {
     DetectTagData td;
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
     const char *str_ptr = NULL;
 
-    ret = pcre_exec(parse_regex, parse_regex_study, tagstr, strlen(tagstr), 0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, tagstr, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 1) {
         SCLogError(SC_ERR_PCRE_MATCH, "parse error, ret %" PRId32 ", string %s", ret, tagstr);
         goto error;
@@ -196,7 +198,7 @@ static DetectTagData *DetectTagParse(const char *tagstr)
         }
 
         /* count */
-        if (ByteExtractStringUint32(&td.count, 10, strlen(str_ptr),
+        if (StringParseUint32(&td.count, 10, strlen(str_ptr),
                     str_ptr) <= 0) {
             SCLogError(SC_ERR_INVALID_VALUE, "Invalid argument for count. Must be a value in the range of 0 to %"PRIu32" (%s)", UINT32_MAX, tagstr);
             goto error;
@@ -283,29 +285,22 @@ error:
  */
 int DetectTagSetup(DetectEngineCtx *de_ctx, Signature *s, const char *tagstr)
 {
-    DetectTagData *td = NULL;
-    SigMatch *sm = NULL;
+    DetectTagData *td = DetectTagParse(tagstr);
+    if (td == NULL)
+        return -1;
 
-    td = DetectTagParse(tagstr);
-    if (td == NULL) goto error;
-
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        goto error;
+    SigMatch *sm = SigMatchAlloc();
+    if (sm == NULL) {
+        DetectTagDataFree(de_ctx, td);
+        return -1;
+    }
 
     sm->type = DETECT_TAG;
     sm->ctx = (SigMatchCtx *)td;
 
     /* Append it to the list of tags */
     SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_TMATCH);
-
     return 0;
-
-error:
-    if (td != NULL) DetectTagDataFree(td);
-    if (sm != NULL) SCFree(sm);
-    return -1;
-
 }
 
 /** \internal
@@ -348,7 +343,7 @@ void DetectTagDataListFree(void *ptr)
  *
  * \param td pointer to DetectTagData
  */
-void DetectTagDataFree(void *ptr)
+void DetectTagDataFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectTagData *td = (DetectTagData *)ptr;
     SCFree(td);
@@ -368,7 +363,7 @@ static int DetectTagTestParse01(void)
     if (td != NULL && td->type == DETECT_TAG_TYPE_SESSION
         && td->count == 123
         && td->metric == DETECT_TAG_METRIC_PACKET) {
-        DetectTagDataFree(td);
+        DetectTagDataFree(NULL, td);
         result = 1;
     }
 
@@ -388,7 +383,7 @@ static int DetectTagTestParse02(void)
         && td->metric == DETECT_TAG_METRIC_BYTES
         && td->direction == DETECT_TAG_DIR_SRC) {
             result = 1;
-        DetectTagDataFree(td);
+        DetectTagDataFree(NULL, td);
     }
 
     return result;
@@ -407,7 +402,7 @@ static int DetectTagTestParse03(void)
         && td->metric == DETECT_TAG_METRIC_BYTES
         && td->direction == DETECT_TAG_DIR_DST) {
             result = 1;
-        DetectTagDataFree(td);
+        DetectTagDataFree(NULL, td);
     }
 
     return result;
@@ -425,7 +420,7 @@ static int DetectTagTestParse04(void)
         && td->count == DETECT_TAG_MAX_PKTS
         && td->metric == DETECT_TAG_METRIC_PACKET) {
             result = 1;
-        DetectTagDataFree(td);
+        DetectTagDataFree(NULL, td);
     }
 
     return result;
@@ -444,20 +439,17 @@ static int DetectTagTestParse05(void)
         && td->metric == DETECT_TAG_METRIC_PACKET
         && td->direction == DETECT_TAG_DIR_DST) {
             result = 1;
-        DetectTagDataFree(td);
+        DetectTagDataFree(NULL, td);
     }
 
     return result;
 }
-
-#endif /* UNITTESTS */
 
 /**
  * \brief this function registers unit tests for DetectTag
  */
 void DetectTagRegisterTests(void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("DetectTagTestParse01", DetectTagTestParse01);
     UtRegisterTest("DetectTagTestParse02", DetectTagTestParse02);
     UtRegisterTest("DetectTagTestParse03", DetectTagTestParse03);
@@ -465,5 +457,5 @@ void DetectTagRegisterTests(void)
     UtRegisterTest("DetectTagTestParse05", DetectTagTestParse05);
 
     DetectEngineTagRegisterTests();
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

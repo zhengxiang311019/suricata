@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Open Information Security Foundation
+/* Copyright (C) 2014-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -50,7 +50,8 @@
 
 #define MODULE_NAME "JsonStatsLog"
 
-#ifdef HAVE_LIBJANSSON
+extern bool stats_decoder_events;
+extern const char *stats_decoder_events_prefix;
 
 /**
  * specify which engine info will be printed in stats log.
@@ -69,6 +70,7 @@ typedef struct OutputStatsCtx_ {
 
 typedef struct JsonStatsLogThread_ {
     OutputStatsCtx *statslog_ctx;
+    LogFileCtx *file_ctx;
     MemBuffer *buffer;
 } JsonStatsLogThread;
 
@@ -168,12 +170,12 @@ static json_t *OutputStats2Json(json_t *js, const char *key)
 {
     void *iter;
 
-    const char *dot = index(key, '.');
+    const char *dot = strchr(key, '.');
     if (dot == NULL)
         return NULL;
     if (strlen(dot) > 2) {
         if (*(dot + 1) == '.' && *(dot + 2) != '\0')
-            dot = index(dot + 2, '.');
+            dot = strchr(dot + 2, '.');
     }
 
     size_t predot_len = (dot - key) + 1;
@@ -181,7 +183,7 @@ static json_t *OutputStats2Json(json_t *js, const char *key)
     strlcpy(s, key, predot_len);
 
     iter = json_object_iter_at(js, s);
-    const char *s2 = index(dot+1, '.');
+    const char *s2 = strchr(dot+1, '.');
 
     json_t *value = json_object_iter_value(iter);
     if (value == NULL) {
@@ -229,8 +231,8 @@ json_t *StatsToJSON(const StatsTable *st, uint8_t flags)
                 continue;
             const char *name = st->stats[u].name;
             const char *shortname = name;
-            if (rindex(name, '.') != NULL) {
-                shortname = &name[rindex(name, '.') - name + 1];
+            if (strrchr(name, '.') != NULL) {
+                shortname = &name[strrchr(name, '.') - name + 1];
             }
             json_t *js_type = OutputStats2Json(js_stats, name);
             if (js_type != NULL) {
@@ -267,7 +269,7 @@ json_t *StatsToJSON(const StatsTable *st, uint8_t flags)
 
                 char str[256];
                 snprintf(str, sizeof(str), "%s.%s", st->tstats[u].tm_name, st->tstats[u].name);
-                char *shortname = &str[rindex(str, '.') - str + 1];
+                char *shortname = &str[strrchr(str, '.') - str + 1];
                 json_t *js_type = OutputStats2Json(threads, str);
 
                 if (js_type != NULL) {
@@ -312,7 +314,7 @@ static int JsonStatsLogger(ThreadVars *tv, void *thread_data, const StatsTable *
 
     json_object_set_new(js, "stats", js_stats);
 
-    OutputJSONBuffer(js, aft->statslog_ctx->file_ctx, &aft->buffer);
+    OutputJSONBuffer(js, aft->file_ctx, &aft->buffer);
     MemBufferReset(aft->buffer);
 
     json_object_clear(js_stats);
@@ -323,32 +325,40 @@ static int JsonStatsLogger(ThreadVars *tv, void *thread_data, const StatsTable *
     SCReturnInt(0);
 }
 
-#define OUTPUT_BUFFER_SIZE 65535
 static TmEcode JsonStatsLogThreadInit(ThreadVars *t, const void *initdata, void **data)
 {
-    JsonStatsLogThread *aft = SCMalloc(sizeof(JsonStatsLogThread));
+    JsonStatsLogThread *aft = SCCalloc(1, sizeof(JsonStatsLogThread));
     if (unlikely(aft == NULL))
         return TM_ECODE_FAILED;
-    memset(aft, 0, sizeof(JsonStatsLogThread));
 
     if(initdata == NULL)
     {
         SCLogDebug("Error getting context for EveLogStats.  \"initdata\" argument NULL");
-        SCFree(aft);
-        return TM_ECODE_FAILED;
+        goto error_exit;
     }
 
-    /* Use the Ouptut Context (file pointer and mutex) */
+    aft->buffer = MemBufferCreateNew(JSON_OUTPUT_BUFFER_SIZE);
+    if (aft->buffer == NULL) {
+        goto error_exit;
+    }
+
+    /* Use the Output Context (file pointer and mutex) */
     aft->statslog_ctx = ((OutputCtx *)initdata)->data;
 
-    aft->buffer = MemBufferCreateNew(OUTPUT_BUFFER_SIZE);
-    if (aft->buffer == NULL) {
-        SCFree(aft);
-        return TM_ECODE_FAILED;
+    aft->file_ctx = LogFileEnsureExists(aft->statslog_ctx->file_ctx, t->id);
+    if (!aft->file_ctx) {
+        goto error_exit;
     }
 
     *data = (void *)aft;
     return TM_ECODE_OK;
+
+error_exit:
+    if (aft->buffer != NULL) {
+        MemBufferFree(aft->buffer);
+    }
+    SCFree(aft);
+    return TM_ECODE_FAILED;
 }
 
 static TmEcode JsonStatsLogThreadDeinit(ThreadVars *t, void *data)
@@ -367,73 +377,6 @@ static TmEcode JsonStatsLogThreadDeinit(ThreadVars *t, void *data)
     return TM_ECODE_OK;
 }
 
-static void OutputStatsLogDeinit(OutputCtx *output_ctx)
-{
-
-    OutputStatsCtx *stats_ctx = output_ctx->data;
-    LogFileCtx *logfile_ctx = stats_ctx->file_ctx;
-    LogFileFreeCtx(logfile_ctx);
-    SCFree(stats_ctx);
-    SCFree(output_ctx);
-}
-
-#define DEFAULT_LOG_FILENAME "stats.json"
-static OutputInitResult OutputStatsLogInit(ConfNode *conf)
-{
-    OutputInitResult result = { NULL, false };
-    LogFileCtx *file_ctx = LogFileNewCtx();
-    if(file_ctx == NULL) {
-        SCLogError(SC_ERR_STATS_LOG_GENERIC, "couldn't create new file_ctx");
-        return result;
-    }
-
-    if (SCConfLogOpenGeneric(conf, file_ctx, DEFAULT_LOG_FILENAME, 1) < 0) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-
-    OutputStatsCtx *stats_ctx = SCMalloc(sizeof(OutputStatsCtx));
-    if (unlikely(stats_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-    stats_ctx->flags = JSON_STATS_TOTALS;
-
-    if (conf != NULL) {
-        const char *totals = ConfNodeLookupChildValue(conf, "totals");
-        const char *threads = ConfNodeLookupChildValue(conf, "threads");
-        const char *deltas = ConfNodeLookupChildValue(conf, "deltas");
-        SCLogDebug("totals %s threads %s deltas %s", totals, threads, deltas);
-
-        if (totals != NULL && ConfValIsFalse(totals)) {
-            stats_ctx->flags &= ~JSON_STATS_TOTALS;
-        }
-        if (threads != NULL && ConfValIsTrue(threads)) {
-            stats_ctx->flags |= JSON_STATS_THREADS;
-        }
-        if (deltas != NULL && ConfValIsTrue(deltas)) {
-            stats_ctx->flags |= JSON_STATS_DELTAS;
-        }
-        SCLogDebug("stats_ctx->flags %08x", stats_ctx->flags);
-    }
-
-    OutputCtx *output_ctx = SCCalloc(1, sizeof(OutputCtx));
-    if (unlikely(output_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        SCFree(stats_ctx);
-        return result;
-    }
-
-    stats_ctx->file_ctx = file_ctx;
-
-    output_ctx->data = stats_ctx;
-    output_ctx->DeInit = OutputStatsLogDeinit;
-
-    result.ctx = output_ctx;
-    result.ok = true;
-    return result;
-}
-
 static void OutputStatsLogDeinitSub(OutputCtx *output_ctx)
 {
     OutputStatsCtx *stats_ctx = output_ctx->data;
@@ -445,9 +388,24 @@ static OutputInitResult OutputStatsLogInitSub(ConfNode *conf, OutputCtx *parent_
 {
     OutputInitResult result = { NULL, false };
     OutputJsonCtx *ajt = parent_ctx->data;
+
+    if (!StatsEnabled()) {
+        SCLogError(SC_ERR_STATS_LOG_GENERIC,
+                "eve.stats: stats are disabled globally: set stats.enabled to true. "
+                "See %s/configuration/suricata-yaml.html#stats", GetDocURL());
+        return result;
+    }
+
     OutputStatsCtx *stats_ctx = SCMalloc(sizeof(OutputStatsCtx));
     if (unlikely(stats_ctx == NULL))
         return result;
+
+    if (stats_decoder_events &&
+            strcmp(stats_decoder_events_prefix, "decoder") == 0) {
+        SCLogWarning(SC_WARN_EVE_MISSING_EVENTS, "eve.stats will not display "
+                "all decoder events correctly. See #2225. Set a prefix in "
+                "stats.decoder-events-prefix.");
+    }
 
     stats_ctx->flags = JSON_STATS_TOTALS;
 
@@ -494,21 +452,8 @@ static OutputInitResult OutputStatsLogInitSub(ConfNode *conf, OutputCtx *parent_
 }
 
 void JsonStatsLogRegister(void) {
-    /* register as separate module */
-    OutputRegisterStatsModule(LOGGER_JSON_STATS, MODULE_NAME, "stats-json",
-        OutputStatsLogInit, JsonStatsLogger, JsonStatsLogThreadInit,
-        JsonStatsLogThreadDeinit, NULL);
-
-    /* also register as child of eve-log */
+    /* register as child of eve-log */
     OutputRegisterStatsSubModule(LOGGER_JSON_STATS, "eve-log", MODULE_NAME,
         "eve-log.stats", OutputStatsLogInitSub, JsonStatsLogger,
         JsonStatsLogThreadInit, JsonStatsLogThreadDeinit, NULL);
 }
-
-#else
-
-void JsonStatsLogRegister (void)
-{
-}
-
-#endif

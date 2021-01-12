@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2019 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -100,13 +100,13 @@ void SCReferenceConfDeinit(void)
  *
  * \param de_ctx Pointer to the Detection Engine Context.
  *
+ * \note if file open fails, we leave de_ctx->reference_conf_ht initialized
+ *
  * \retval  0 On success.
  * \retval -1 On failure.
  */
 static FILE *SCRConfInitContextAndLocalResources(DetectEngineCtx *de_ctx, FILE *fd)
 {
-    const char *filename = NULL;
-
     /* init the hash table to be used by the reference config references */
     de_ctx->reference_conf_ht = HashTableInit(128, SCRConfReferenceHashFunc,
                                               SCRConfReferenceHashCompareFunc,
@@ -114,7 +114,7 @@ static FILE *SCRConfInitContextAndLocalResources(DetectEngineCtx *de_ctx, FILE *
     if (de_ctx->reference_conf_ht == NULL) {
         SCLogError(SC_ERR_HASH_TABLE_INIT, "Error initializing the hash "
                    "table");
-        goto error;
+        return NULL;
     }
 
     /* if it is not NULL, use the file descriptor.  The hack so that we can
@@ -122,31 +122,19 @@ static FILE *SCRConfInitContextAndLocalResources(DetectEngineCtx *de_ctx, FILE *
      * instead use an input stream against a buffer containing the
      * reference strings */
     if (fd == NULL) {
-        filename = SCRConfGetConfFilename(de_ctx);
+        const char *filename = SCRConfGetConfFilename(de_ctx);
         if ((fd = fopen(filename, "r")) == NULL) {
 #ifdef UNITTESTS
             if (RunmodeIsUnittests())
-                goto error; // silently fail
+                return NULL; // silently fail
 #endif
             SCLogError(SC_ERR_FOPEN, "Error opening file: \"%s\": %s", filename,
                        strerror(errno));
-            goto error;
+            return NULL;
         }
     }
 
     return fd;
-
- error:
-    if (de_ctx->reference_conf_ht != NULL) {
-        HashTableFree(de_ctx->reference_conf_ht);
-        de_ctx->reference_conf_ht = NULL;
-    }
-    if (fd != NULL) {
-        fclose(fd);
-        fd = NULL;
-    }
-
-    return NULL;
 }
 
 
@@ -242,10 +230,10 @@ static char *SCRConfStringToLowercase(const char *str)
  * \retval  0 On success.
  * \retval -1 On failure.
  */
-static int SCRConfAddReference(char *rawstr, DetectEngineCtx *de_ctx)
+int SCRConfAddReference(DetectEngineCtx *de_ctx, const char *line)
 {
-    char system[64];
-    char url[1024];
+    char system[REFERENCE_SYSTEM_NAME_MAX];
+    char url[REFERENCE_CONTENT_NAME_MAX];
 
     SCRConfReference *ref_new = NULL;
     SCRConfReference *ref_lookup = NULL;
@@ -254,7 +242,7 @@ static int SCRConfAddReference(char *rawstr, DetectEngineCtx *de_ctx)
     int ret = 0;
     int ov[MAX_SUBSTRINGS];
 
-    ret = pcre_exec(regex, regex_study, rawstr, strlen(rawstr), 0, 0, ov, 30);
+    ret = pcre_exec(regex, regex_study, line, strlen(line), 0, 0, ov, 30);
     if (ret < 0) {
         SCLogError(SC_ERR_REFERENCE_CONFIG, "Invalid Reference Config in "
                    "reference.config file");
@@ -262,14 +250,14 @@ static int SCRConfAddReference(char *rawstr, DetectEngineCtx *de_ctx)
     }
 
     /* retrieve the reference system */
-    ret = pcre_copy_substring((char *)rawstr, ov, 30, 1, system, sizeof(system));
+    ret = pcre_copy_substring((char *)line, ov, 30, 1, system, sizeof(system));
     if (ret < 0) {
         SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_copy_substring() failed");
         goto error;
     }
 
     /* retrieve the reference url */
-    ret = pcre_copy_substring((char *)rawstr, ov, 30, 2, url, sizeof(url));
+    ret = pcre_copy_substring((char *)line, ov, 30, 2, url, sizeof(url));
     if (ret < 0) {
         SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_copy_substring() failed");
         goto error;
@@ -343,7 +331,7 @@ static void SCRConfParseFile(DetectEngineCtx *de_ctx, FILE *fd)
         if (SCRConfIsLineBlankOrComment(line))
             continue;
 
-        SCRConfAddReference(line, de_ctx);
+        SCRConfAddReference(de_ctx, line);
         i++;
     }
 

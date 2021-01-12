@@ -24,12 +24,18 @@
 #ifndef __UTIL_CLASSIFICATION_CONFIG_H__
 #define __UTIL_CLASSIFICATION_CONFIG_H__
 
+#define CLASSTYPE_NAME_MAX_LEN 64
+#define CLASSTYPE_DESC_MAX_LEN 512
+
 /**
  * \brief Container for a Classtype from the Classification.config file.
  */
 typedef struct SCClassConfClasstype_ {
     /* The index of the classification within classification.confg */
-    uint8_t classtype_id;
+    uint16_t classtype_id;
+
+    /* The priority this classification type carries */
+    int priority;
 
     /* The classtype name.  This is the primary key for a Classification. */
     char *classtype;
@@ -37,26 +43,23 @@ typedef struct SCClassConfClasstype_ {
     /* Description for a classification.  Would be used while printing out
      * the classification info for a Signature, by the fast-log module. */
     char *classtype_desc;
-
-    /* The priority this classification type carries */
-    int priority;
 } SCClassConfClasstype;
 
-SCClassConfClasstype *SCClassConfAllocClasstype(uint8_t, const char *,
-                                                const char *, int);
-void SCClassConfDeAllocClasstype(SCClassConfClasstype *);
 void SCClassConfLoadClassficationConfigFile(DetectEngineCtx *, FILE *fd);
+int SCClassConfAddClasstype(DetectEngineCtx *de_ctx, char *rawstr, uint16_t index);
 SCClassConfClasstype *SCClassConfGetClasstype(const char *,
                                               DetectEngineCtx *);
 void SCClassConfDeInitContext(DetectEngineCtx *);
-void SCClassConfRegisterTests(void);
-
-/* for unittests */
-FILE *SCClassConfGenerateValidDummyClassConfigFD01(void);
-FILE *SCClassConfGenerateInValidDummyClassConfigFD02(void);
-FILE *SCClassConfGenerateInValidDummyClassConfigFD03(void);
 
 void SCClassConfInit(void);
 void SCClassConfDeinit(void);
+
+/* for unittests */
+#ifdef UNITTESTS
+void SCClassConfRegisterTests(void);
+FILE *SCClassConfGenerateValidDummyClassConfigFD01(void);
+FILE *SCClassConfGenerateInValidDummyClassConfigFD02(void);
+FILE *SCClassConfGenerateInValidDummyClassConfigFD03(void);
+#endif
 
 #endif /* __UTIL_CLASSIFICATION_CONFIG_H__ */

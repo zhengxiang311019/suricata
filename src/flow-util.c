@@ -101,8 +101,6 @@ uint8_t FlowGetProtoMapping(uint8_t proto)
             return FLOW_PROTO_UDP;
         case IPPROTO_ICMP:
             return FLOW_PROTO_ICMP;
-        case IPPROTO_SCTP:
-            return FLOW_PROTO_SCTP;
         default:
             return FLOW_PROTO_DEFAULT;
     }
@@ -117,8 +115,6 @@ uint8_t FlowGetReverseProtoMapping(uint8_t rproto)
             return IPPROTO_UDP;
         case FLOW_PROTO_ICMP:
             return IPPROTO_ICMP;
-        case FLOW_PROTO_SCTP:
-            return IPPROTO_SCTP;
         default:
             exit(EXIT_FAILURE);
     }
@@ -153,6 +149,8 @@ void FlowInit(Flow *f, const Packet *p)
     f->recursion_level = p->recursion_level;
     f->vlan_id[0] = p->vlan_id[0];
     f->vlan_id[1] = p->vlan_id[1];
+    f->vlan_idx = p->vlan_idx;
+    f->livedev = p->livedev;
 
     if (PKT_IS_IPV4(p)) {
         FLOW_SET_IPV4_SRC_ADDR_FROM_PACKET(p, &f->src);
@@ -198,7 +196,45 @@ void FlowInit(Flow *f, const Packet *p)
     COPY_TIMESTAMP(&p->ts, &f->startts);
 
     f->protomap = FlowGetProtoMapping(f->proto);
+    f->timeout_policy = FlowGetTimeoutPolicy(f);
+    const uint32_t timeout_at = (uint32_t)f->startts.tv_sec + f->timeout_policy;
+    f->timeout_at = timeout_at;
+
+    if (MacSetFlowStorageEnabled()) {
+        MacSet *ms = FlowGetStorageById(f, MacSetGetFlowStorageID());
+        if (ms != NULL) {
+            MacSetReset(ms);
+        } else {
+            ms = MacSetInit(10);
+            FlowSetStorageById(f, MacSetGetFlowStorageID(), ms);
+        }
+    }
 
     SCReturn;
 }
 
+int g_bypass_info_id = -1;
+
+int GetFlowBypassInfoID(void)
+{
+    return g_bypass_info_id;
+}
+
+static void FlowBypassFree(void *x)
+{
+    FlowBypassInfo *fb = (FlowBypassInfo *) x;
+
+    if (fb == NULL)
+        return;
+
+    if (fb->bypass_data && fb->BypassFree) {
+        fb->BypassFree(fb->bypass_data);
+    }
+    SCFree(fb);
+}
+
+void RegisterFlowBypassInfo(void)
+{
+    g_bypass_info_id = FlowStorageRegister("bypass_counters", sizeof(void *),
+                                              NULL, FlowBypassFree);
+}

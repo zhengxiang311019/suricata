@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2017 Open Information Security Foundation
+/* Copyright (C) 2007-2019 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -53,7 +53,7 @@ void ReceivePfringThreadExitStats(ThreadVars *, void *);
 TmEcode ReceivePfringThreadDeinit(ThreadVars *, void *);
 
 TmEcode DecodePfringThreadInit(ThreadVars *, const void *, void **);
-TmEcode DecodePfring(ThreadVars *, Packet *, void *, PacketQueue *, PacketQueue *);
+TmEcode DecodePfring(ThreadVars *, Packet *, void *);
 TmEcode DecodePfringThreadDeinit(ThreadVars *tv, void *data);
 
 extern int max_pending_packets;
@@ -70,7 +70,6 @@ void TmModuleReceivePfringRegister (void)
     tmm_modules[TMM_RECEIVEPFRING].Func = NULL;
     tmm_modules[TMM_RECEIVEPFRING].ThreadExitPrintStats = NULL;
     tmm_modules[TMM_RECEIVEPFRING].ThreadDeinit = NULL;
-    tmm_modules[TMM_RECEIVEPFRING].RegisterTests = NULL;
     tmm_modules[TMM_RECEIVEPFRING].cap_flags = SC_CAP_NET_ADMIN | SC_CAP_NET_RAW |
         SC_CAP_NET_BIND_SERVICE | SC_CAP_NET_BROADCAST;
     tmm_modules[TMM_RECEIVEPFRING].flags = TM_FLAG_RECEIVE_TM;
@@ -83,13 +82,12 @@ void TmModuleDecodePfringRegister (void)
     tmm_modules[TMM_DECODEPFRING].Func = NULL;
     tmm_modules[TMM_DECODEPFRING].ThreadExitPrintStats = NULL;
     tmm_modules[TMM_DECODEPFRING].ThreadDeinit = NULL;
-    tmm_modules[TMM_DECODEPFRING].RegisterTests = NULL;
     tmm_modules[TMM_DECODEPFRING].cap_flags = 0;
     tmm_modules[TMM_DECODEPFRING].flags = TM_FLAG_DECODE_TM;
 }
 
 /**
- * \brief this funciton prints an error message and exits.
+ * \brief this function prints an error message and exits.
  * \param tv pointer to ThreadVars
  * \param initdata pointer to the interface passed from the user
  * \param data pointer gets populated with PfringThreadVars
@@ -120,7 +118,7 @@ static SCMutex pfring_bpf_set_filter_lock = SCMUTEX_INITIALIZER;
 /**
  * \brief Structure to hold thread specific variables.
  */
-typedef struct PfringThreadVars_
+struct PfringThreadVars_
 {
     /* thread specific handle */
     pfring *pd;
@@ -138,7 +136,7 @@ typedef struct PfringThreadVars_
     ThreadVars *tv;
     TmSlot *slot;
 
-    int vlan_disabled;
+    int vlan_in_ext_header;
 
     /* threads count */
     int threads;
@@ -154,7 +152,7 @@ typedef struct PfringThreadVars_
      ChecksumValidationMode checksum_mode;
 
     bool vlan_hdr_warned;
-} PfringThreadVars;
+};
 
 /**
  * \brief Registration Function for RecievePfring.
@@ -169,7 +167,6 @@ void TmModuleReceivePfringRegister (void)
     tmm_modules[TMM_RECEIVEPFRING].PktAcqBreakLoop = PfringBreakLoop;
     tmm_modules[TMM_RECEIVEPFRING].ThreadExitPrintStats = ReceivePfringThreadExitStats;
     tmm_modules[TMM_RECEIVEPFRING].ThreadDeinit = ReceivePfringThreadDeinit;
-    tmm_modules[TMM_RECEIVEPFRING].RegisterTests = NULL;
     tmm_modules[TMM_RECEIVEPFRING].flags = TM_FLAG_RECEIVE_TM;
 }
 
@@ -184,7 +181,6 @@ void TmModuleDecodePfringRegister (void)
     tmm_modules[TMM_DECODEPFRING].Func = DecodePfring;
     tmm_modules[TMM_DECODEPFRING].ThreadExitPrintStats = NULL;
     tmm_modules[TMM_DECODEPFRING].ThreadDeinit = DecodePfringThreadDeinit;
-    tmm_modules[TMM_DECODEPFRING].RegisterTests = NULL;
     tmm_modules[TMM_DECODEPFRING].flags = TM_FLAG_DECODE_TM;
 }
 
@@ -217,7 +213,7 @@ static inline void PfringDumpCounters(PfringThreadVars *ptv)
  * \brief Pfring Packet Process function.
  *
  * This function fills in our packet structure from libpfring.
- * From here the packets are picked up by the  DecodePfring thread.
+ * From here the packets are picked up by the DecodePfring thread.
  *
  * \param user pointer to PfringThreadVars
  * \param h pointer to pfring packet header
@@ -253,16 +249,15 @@ static inline void PfringProcessPacket(void *user, struct pfring_pkthdr *h, Pack
      * PF_RING should put it back in all cases, but as a extra
      * precaution keep the check here. If the vlan header is
      * part of the raw packet, the vlan_offset will be set.
-     * So is it is not set, use the parsed info from PF_RING's
+     * So if it is not set, use the parsed info from PF_RING's
      * extended header.
      */
-    if ((!ptv->vlan_disabled) &&
+    if (ptv->vlan_in_ext_header &&
         h->extended_hdr.parsed_pkt.offset.vlan_offset == 0 &&
         h->extended_hdr.parsed_pkt.vlan_id)
     {
         p->vlan_id[0] = h->extended_hdr.parsed_pkt.vlan_id & 0x0fff;
         p->vlan_idx = 1;
-        p->vlanh[0] = NULL;
 
         if (!ptv->vlan_hdr_warned) {
             SCLogWarning(SC_ERR_PF_RING_VLAN, "no VLAN header in the raw "
@@ -281,12 +276,10 @@ static inline void PfringProcessPacket(void *user, struct pfring_pkthdr *h, Pack
             p->flags |= PKT_IGNORE_CHECKSUM;
             break;
         case CHECKSUM_VALIDATION_AUTO:
-            if (ptv->livedev->ignore_checksum) {
-                p->flags |= PKT_IGNORE_CHECKSUM;
-            } else if (ChecksumAutoModeCheck(ptv->pkts,
+            if (ChecksumAutoModeCheck(ptv->pkts,
                         SC_ATOMIC_GET(ptv->livedev->pkts),
                         SC_ATOMIC_GET(ptv->livedev->invalid_checksums))) {
-                ptv->livedev->ignore_checksum = 1;
+                ptv->checksum_mode = CHECKSUM_VALIDATION_DISABLE;
                 p->flags |= PKT_IGNORE_CHECKSUM;
             }
             break;
@@ -420,7 +413,6 @@ TmEcode ReceivePfringLoop(ThreadVars *tv, void *data, void *slot)
             PfringProcessPacket(ptv, &hdr, p);
 
             if (TmThreadsSlotProcessPkt(ptv->tv, ptv->slot, p) != TM_ECODE_OK) {
-                TmqhOutputPacketpool(ptv->tv, p);
                 SCReturnInt(TM_ECODE_FAILED);
             }
 
@@ -435,7 +427,7 @@ TmEcode ReceivePfringLoop(ThreadVars *tv, void *data, void *slot)
             }
 
             /* pfring didn't use the packet yet */
-            TmThreadsCaptureInjectPacket(tv, ptv->slot, p);
+            TmThreadsCaptureHandleTimeout(tv, p);
 
         } else {
             SCLogError(SC_ERR_PF_RING_RECV,"pfring_recv error  %" PRId32 "", r);
@@ -532,9 +524,8 @@ TmEcode ReceivePfringThreadInit(ThreadVars *tv, const void *initdata, void **dat
 
     opflag = PF_RING_PROMISC;
 
-    /* if suri uses VLAN and if we have a recent kernel, we need
-     * to use parsed_pkt to get VLAN info */
-    if ((! ptv->vlan_disabled) && SCKernelVersionIsAtLeast(3, 0)) {
+    /* if we have a recent kernel, we need to use parsed_pkt to get VLAN info */
+    if (ptv->vlan_in_ext_header) {
         opflag |= PF_RING_LONG_HEADER;
     }
 
@@ -614,8 +605,9 @@ TmEcode ReceivePfringThreadInit(ThreadVars *tv, const void *initdata, void **dat
             SCMutexUnlock(&pfring_bpf_set_filter_lock);
 
             if (rc < 0) {
-                SCLogInfo("Set PF_RING bpf filter \"%s\" failed.",
-                          ptv->bpf_filter);
+                SCLogError(SC_ERR_INVALID_VALUE, "Failed to compile BPF \"%s\"",
+                           ptv->bpf_filter);
+                return TM_ECODE_FAILED;
             }
         }
     }
@@ -629,26 +621,19 @@ TmEcode ReceivePfringThreadInit(ThreadVars *tv, const void *initdata, void **dat
             ptv->tv);
 #endif
 
-    /* A bit strange to have this here but we only have vlan information
-     * during reading so we need to know if we want to keep vlan during
-     * the capture phase */
-    int vlanbool = 0;
-    if ((ConfGetBool("vlan.use-for-tracking", &vlanbool)) == 1 && vlanbool == 0) {
-        ptv->vlan_disabled = 1;
-    }
-
-    /* If kernel is older than 3.8, VLAN is not stripped so we don't
+    /* If kernel is older than 3.0, VLAN is not stripped so we don't
      * get the info from packt extended header but we will use a standard
      * parsing */
+    ptv->vlan_in_ext_header = 1;
     if (! SCKernelVersionIsAtLeast(3, 0)) {
-        ptv->vlan_disabled = 1;
+        ptv->vlan_in_ext_header = 0;
     }
 
-    /* If VLAN tracking is disabled, set cluster type to 5-tuple or in case of a
-     * ZC interface, do nothing */
-    if (ptv->vlan_disabled && ptv->ctype == CLUSTER_FLOW &&
+    /* If VLAN tags are not in the extended header, set cluster type to 5-tuple
+     * or in case of a ZC interface, do nothing */
+    if ((! ptv->vlan_in_ext_header) && ptv->ctype == CLUSTER_FLOW &&
             strncmp(ptv->interface, "zc", 2) != 0) {
-        SCLogPerf("VLAN disabled, setting cluster type to CLUSTER_FLOW_5_TUPLE");
+        SCLogPerf("VLAN not in extended header, setting cluster type to CLUSTER_FLOW_5_TUPLE");
         rc = pfring_set_cluster(ptv->pd, ptv->cluster_id, CLUSTER_FLOW_5_TUPLE);
 
         if (rc != 0) {
@@ -714,13 +699,12 @@ TmEcode ReceivePfringThreadDeinit(ThreadVars *tv, void *data)
 /**
  * \brief This function passes off to link type decoders.
  *
- * DecodePfring reads packets from the PacketQueue. Inside of libpcap version of
+ * DecodePfring decodes raw packets from PF_RING. Inside of libpcap version of
  * PF_RING all packets are marked as a link type of ethernet so that is what we do here.
  *
  * \param tv pointer to ThreadVars
  * \param p pointer to the current packet
  * \param data pointer that gets cast into PfringThreadVars for ptv
- * \param pq pointer to the current PacketQueue
  *
  * \todo Verify that PF_RING only deals with ethernet traffic
  *
@@ -728,14 +712,11 @@ TmEcode ReceivePfringThreadDeinit(ThreadVars *tv, void *data)
  *
  * \retval TM_ECODE_OK is always returned
  */
-TmEcode DecodePfring(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq, PacketQueue *postpq)
+TmEcode DecodePfring(ThreadVars *tv, Packet *p, void *data)
 {
     DecodeThreadVars *dtv = (DecodeThreadVars *)data;
 
-    /* XXX HACK: flow timeout can call us for injected pseudo packets
-     *           see bug: https://redmine.openinfosecfoundation.org/issues/1107 */
-    if (p->flags & PKT_PSEUDO_STREAM_END)
-        return TM_ECODE_OK;
+    BUG_ON(PKT_IS_PSEUDOPKT(p));
 
     /* update counters */
     DecodeUpdatePacketCounters(tv, dtv, p);
@@ -745,7 +726,7 @@ TmEcode DecodePfring(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq, Pac
         StatsIncr(tv, dtv->counter_vlan);
     }
 
-    DecodeEthernet(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p), pq);
+    DecodeEthernet(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p));
 
     PacketDecodeFinalize(tv, dtv, p);
 

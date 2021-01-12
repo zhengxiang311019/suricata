@@ -64,7 +64,6 @@ void TmModuleReceiveIPFWRegister (void)
     tmm_modules[TMM_RECEIVEIPFW].Func = NULL;
     tmm_modules[TMM_RECEIVEIPFW].ThreadExitPrintStats = NULL;
     tmm_modules[TMM_RECEIVEIPFW].ThreadDeinit = NULL;
-    tmm_modules[TMM_RECEIVEIPFW].RegisterTests = NULL;
     tmm_modules[TMM_RECEIVEIPFW].flags = TM_FLAG_RECEIVE_TM;
 }
 
@@ -75,7 +74,6 @@ void TmModuleVerdictIPFWRegister (void)
     tmm_modules[TMM_VERDICTIPFW].Func = NULL;
     tmm_modules[TMM_VERDICTIPFW].ThreadExitPrintStats = NULL;
     tmm_modules[TMM_VERDICTIPFW].ThreadDeinit = NULL;
-    tmm_modules[TMM_VERDICTIPFW].RegisterTests = NULL;
 }
 
 void TmModuleDecodeIPFWRegister (void)
@@ -85,7 +83,6 @@ void TmModuleDecodeIPFWRegister (void)
     tmm_modules[TMM_DECODEIPFW].Func = NULL;
     tmm_modules[TMM_DECODEIPFW].ThreadExitPrintStats = NULL;
     tmm_modules[TMM_DECODEIPFW].ThreadDeinit = NULL;
-    tmm_modules[TMM_DECODEIPFW].RegisterTests = NULL;
     tmm_modules[TMM_DECODEIPFW].cap_flags = 0;
     tmm_modules[TMM_DECODEIPFW].flags = TM_FLAG_DECODE_TM;
 }
@@ -129,22 +126,22 @@ static uint16_t receive_port_num = 0;
 static SCMutex ipfw_init_lock;
 
 /* IPFW Prototypes */
-void *IPFWGetQueue(int number);
-TmEcode ReceiveIPFWThreadInit(ThreadVars *, const void *, void **);
-TmEcode ReceiveIPFW(ThreadVars *, Packet *, void *, PacketQueue *, PacketQueue *);
-TmEcode ReceiveIPFWLoop(ThreadVars *tv, void *data, void *slot);
-void ReceiveIPFWThreadExitStats(ThreadVars *, void *);
-TmEcode ReceiveIPFWThreadDeinit(ThreadVars *, void *);
+static void *IPFWGetQueue(int number);
+static TmEcode ReceiveIPFWThreadInit(ThreadVars *, const void *, void **);
+static TmEcode ReceiveIPFW(ThreadVars *, Packet *, void *);
+static TmEcode ReceiveIPFWLoop(ThreadVars *tv, void *data, void *slot);
+static void ReceiveIPFWThreadExitStats(ThreadVars *, void *);
+static TmEcode ReceiveIPFWThreadDeinit(ThreadVars *, void *);
 
-TmEcode IPFWSetVerdict(ThreadVars *, IPFWThreadVars *, Packet *);
-TmEcode VerdictIPFW(ThreadVars *, Packet *, void *, PacketQueue *, PacketQueue *);
-TmEcode VerdictIPFWThreadInit(ThreadVars *, const void *, void **);
-void VerdictIPFWThreadExitStats(ThreadVars *, void *);
-TmEcode VerdictIPFWThreadDeinit(ThreadVars *, void *);
+static TmEcode IPFWSetVerdict(ThreadVars *, IPFWThreadVars *, Packet *);
+static TmEcode VerdictIPFW(ThreadVars *, Packet *, void *);
+static TmEcode VerdictIPFWThreadInit(ThreadVars *, const void *, void **);
+static void VerdictIPFWThreadExitStats(ThreadVars *, void *);
+static TmEcode VerdictIPFWThreadDeinit(ThreadVars *, void *);
 
-TmEcode DecodeIPFWThreadInit(ThreadVars *, const void *, void **);
-TmEcode DecodeIPFWThreadDeinit(ThreadVars *tv, void *data);
-TmEcode DecodeIPFW(ThreadVars *, Packet *, void *, PacketQueue *, PacketQueue *);
+static TmEcode DecodeIPFWThreadInit(ThreadVars *, const void *, void **);
+static TmEcode DecodeIPFWThreadDeinit(ThreadVars *tv, void *data);
+static TmEcode DecodeIPFW(ThreadVars *, Packet *, void *);
 
 /**
  * \brief Registration Function for RecieveIPFW.
@@ -164,7 +161,6 @@ void TmModuleReceiveIPFWRegister (void)
     tmm_modules[TMM_RECEIVEIPFW].cap_flags = SC_CAP_NET_ADMIN | SC_CAP_NET_RAW |
                                              SC_CAP_NET_BIND_SERVICE |
                                              SC_CAP_NET_BROADCAST; /** \todo untested */
-    tmm_modules[TMM_RECEIVEIPFW].RegisterTests = NULL;
     tmm_modules[TMM_RECEIVEIPFW].flags = TM_FLAG_RECEIVE_TM;
 }
 
@@ -181,7 +177,6 @@ void TmModuleVerdictIPFWRegister (void)
     tmm_modules[TMM_VERDICTIPFW].ThreadDeinit = VerdictIPFWThreadDeinit;
     tmm_modules[TMM_VERDICTIPFW].cap_flags = SC_CAP_NET_ADMIN | SC_CAP_NET_RAW |
                                              SC_CAP_NET_BIND_SERVICE; /** \todo untested */
-    tmm_modules[TMM_VERDICTIPFW].RegisterTests = NULL;
 }
 
 /**
@@ -195,7 +190,6 @@ void TmModuleDecodeIPFWRegister (void)
     tmm_modules[TMM_DECODEIPFW].Func = DecodeIPFW;
     tmm_modules[TMM_DECODEIPFW].ThreadExitPrintStats = NULL;
     tmm_modules[TMM_DECODEIPFW].ThreadDeinit = DecodeIPFWThreadDeinit;
-    tmm_modules[TMM_DECODEIPFW].RegisterTests = NULL;
     tmm_modules[TMM_DECODEIPFW].flags = TM_FLAG_DECODE_TM;
 }
 
@@ -304,7 +298,6 @@ TmEcode ReceiveIPFWLoop(ThreadVars *tv, void *data, void *slot)
 
         if (TmThreadsSlotProcessPkt(tv, ((TmSlot *) slot)->slot_next, p)
                 != TM_ECODE_OK) {
-            TmqhOutputPacketpool(tv, p);
             SCReturnInt(TM_ECODE_FAILED);
         }
 
@@ -431,15 +424,14 @@ TmEcode ReceiveIPFWThreadDeinit(ThreadVars *tv, void *data)
  * \brief This function passes off to link type decoders.
  * \todo Unit tests are needed for this module.
  *
- * DecodeIPFW reads packets from the PacketQueue and passes
+ * DecodeIPFW decodes packets from IPFW and passes
  * them off to the proper link type decoder.
  *
  * \param tv pointer to ThreadVars
  * \param p pointer to the current packet
  * \param data pointer that gets cast into IPFWThreadVars for ptv
- * \param pq pointer to the PacketQueue
  */
-TmEcode DecodeIPFW(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq, PacketQueue *postpq)
+TmEcode DecodeIPFW(ThreadVars *tv, Packet *p, void *data)
 {
     IPV4Hdr *ip4h = (IPV4Hdr *)GET_PKT_DATA(p);
     IPV6Hdr *ip6h = (IPV6Hdr *)GET_PKT_DATA(p);
@@ -447,10 +439,7 @@ TmEcode DecodeIPFW(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq, Packe
 
     SCEnter();
 
-    /* XXX HACK: flow timeout can call us for injected pseudo packets
-     *           see bug: https://redmine.openinfosecfoundation.org/issues/1107 */
-    if (p->flags & PKT_PSEUDO_STREAM_END)
-        return TM_ECODE_OK;
+    BUG_ON(PKT_IS_PSEUDOPKT(p));
 
     /* update counters */
     DecodeUpdatePacketCounters(tv, dtv, p);
@@ -461,14 +450,14 @@ TmEcode DecodeIPFW(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq, Packe
             return TM_ECODE_FAILED;
         }
         SCLogDebug("DecodeIPFW ip4 processing");
-        DecodeIPV4(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p), pq);
+        DecodeIPV4(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p));
 
     } else if(IPV6_GET_RAW_VER(ip6h) == 6) {
         if (unlikely(GET_PKT_LEN(p) > USHRT_MAX)) {
             return TM_ECODE_FAILED;
         }
         SCLogDebug("DecodeIPFW ip6 processing");
-        DecodeIPV6(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p), pq);
+        DecodeIPV6(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p));
 
     } else {
         /* We don't support anything besides IP packets for now, bridged packets? */
@@ -611,9 +600,8 @@ TmEcode IPFWSetVerdict(ThreadVars *tv, IPFWThreadVars *ptv, Packet *p)
  * \param tv pointer to ThreadVars
  * \param p pointer to the Packet
  * \param data pointer that gets cast into IPFWThreadVars for ptv
- * \param pq pointer for the Packet Queue access (Not used)
  */
-TmEcode VerdictIPFW(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq, PacketQueue *postpq)
+TmEcode VerdictIPFW(ThreadVars *tv, Packet *p, void *data)
 {
     IPFWThreadVars *ptv = (IPFWThreadVars *)data;
     TmEcode retval = TM_ECODE_OK;
@@ -716,7 +704,7 @@ int IPFWRegisterQueue(char *queue)
     IPFWQueueVars *nq = NULL;
     /* Extract the queue number from the specified command line argument */
     uint16_t port_num = 0;
-    if ((ByteExtractStringUint16(&port_num, 10, strlen(queue), queue)) < 0)
+    if ((StringParseUint16(&port_num, 10, strlen(queue), queue)) < 0)
     {
         SCLogError(SC_ERR_INVALID_ARGUMENT, "specified queue number %s is not "
                                         "valid", queue);

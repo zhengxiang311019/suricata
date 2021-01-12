@@ -28,6 +28,7 @@
 #include "util-decode-mime.h"
 #include "queue.h"
 #include "util-streaming-buffer.h"
+#include "rust.h"
 
 enum {
     SMTP_DECODER_EVENT_INVALID_REPLY,
@@ -50,6 +51,7 @@ enum {
     SMTP_DECODER_EVENT_MIME_LONG_HEADER_NAME,
     SMTP_DECODER_EVENT_MIME_LONG_HEADER_VALUE,
     SMTP_DECODER_EVENT_MIME_BOUNDARY_TOO_LONG,
+    SMTP_DECODER_EVENT_MIME_LONG_FILENAME,
 
     /* Invalid behavior or content */
     SMTP_DECODER_EVENT_DUPLICATE_FIELDS,
@@ -67,12 +69,9 @@ typedef struct SMTPTransaction_ {
     /** id of this tx, starting at 0 */
     uint64_t tx_id;
 
-    uint64_t detect_flags_ts;
-    uint64_t detect_flags_tc;
+    AppLayerTxData tx_data;
 
     int done;
-    /** indicates loggers done logging */
-    uint32_t logged;
     /** the first message contained in the session */
     MimeDecEntity *msg_head;
     /** the last message contained in the session */
@@ -100,6 +99,8 @@ typedef struct SMTPConfig {
     uint32_t content_inspect_min_size;
     uint32_t content_inspect_window;
 
+    int raw_extraction;
+
     StreamingBufferConfig sbcfg;
 } SMTPConfig;
 
@@ -107,15 +108,17 @@ typedef struct SMTPState_ {
     SMTPTransaction *curr_tx;
     TAILQ_HEAD(, SMTPTransaction_) tx_list;  /**< transaction list */
     uint64_t tx_cnt;
+    uint64_t toserver_data_count;
+    uint64_t toserver_last_data_stamp;
 
     /* current input that is being parsed */
-    uint8_t *input;
+    const uint8_t *input;
     int32_t input_len;
     uint8_t direction;
 
     /* --parser details-- */
     /** current line extracted by the parser from the call to SMTPGetline() */
-    uint8_t *current_line;
+    const uint8_t *current_line;
     /** length of the line in current_line.  Doesn't include the delimiter */
     int32_t current_line_len;
     uint8_t current_line_delimiter_len;
@@ -157,20 +160,21 @@ typedef struct SMTPState_ {
      *  handler */
     uint16_t cmds_idx;
 
+    /* HELO of HELO message content */
+    uint16_t helo_len;
+    uint8_t *helo;
+
     /* SMTP Mime decoding and file extraction */
     /** the list of files sent to the server */
     FileContainer *files_ts;
-
-    /* HELO of HELO message content */
-    uint8_t *helo;
-    uint16_t helo_len;
+    uint32_t file_track_id;
 } SMTPState;
 
 /* Create SMTP config structure */
 extern SMTPConfig smtp_config;
 
 int SMTPProcessDataChunk(const uint8_t *chunk, uint32_t len, MimeDecParseState *state);
-void *SMTPStateAlloc(void);
+void *SMTPStateAlloc(void *orig_state, AppProto proto_orig);
 void RegisterSMTPParsers(void);
 void SMTPParserCleanup(void);
 void SMTPParserRegisterTests(void);

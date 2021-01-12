@@ -15,16 +15,20 @@
  * 02110-1301, USA.
  */
 
-extern crate libc;
 extern crate nom;
 
 use std;
+use std::ffi::CString;
 use std::mem::transmute;
+use std::collections::HashMap;
+use std::collections::VecDeque;
 
-use log::*;
-use applayer::LoggerFlags;
-use core;
-use dns::parser;
+use crate::applayer::*;
+use crate::core::{self, AppProto, ALPROTO_UNKNOWN, IPPROTO_UDP, IPPROTO_TCP};
+use crate::dns::parser;
+
+use nom::IResult;
+use nom::number::streaming::be_u16;
 
 /// DNS record types.
 pub const DNS_RECORD_TYPE_A           : u16 = 1;
@@ -123,18 +127,94 @@ pub const DNS_RCODE_BADTRUNC: u16 = 22;
 /// gets logged.
 const MAX_TRANSACTIONS: usize = 32;
 
+static mut ALPROTO_DNS: AppProto = ALPROTO_UNKNOWN;
+
 #[repr(u32)]
 pub enum DNSEvent {
-    UnsolicitedResponse = 0,
-    MalformedData,
-    NotRequest,
-    NotResponse,
-    ZFlagSet,
-    Flooded,
-    StateMemCapReached,
+    MalformedData = 0,
+    NotRequest = 1,
+    NotResponse = 2,
+    ZFlagSet = 3,
+}
+
+impl DNSEvent {
+    pub fn to_cstring(&self) -> &str {
+        match *self {
+            DNSEvent::MalformedData => "MALFORMED_DATA\0",
+            DNSEvent::NotRequest => "NOT_A_REQUEST\0",
+            DNSEvent::NotResponse => "NOT_A_RESPONSE\0",
+            DNSEvent::ZFlagSet => "Z_FLAG_SET\0",
+        }
+    }
+
+    pub fn from_id(id: u32) -> Option<DNSEvent> {
+        match id {
+            0 => Some(DNSEvent::MalformedData),
+            1 => Some(DNSEvent::NotRequest),
+            2 => Some(DNSEvent::NotResponse),
+            4 => Some(DNSEvent::ZFlagSet),
+            _ => None,
+        }
+    }
+
+    pub fn from_string(s: &str) -> Option<DNSEvent> {
+        match s.to_lowercase().as_ref() {
+            "malformed_data" => Some(DNSEvent::MalformedData),
+            "not_a_request" => Some(DNSEvent::NotRequest),
+            "not_a_response" => Some(DNSEvent::NotRequest),
+            "z_flag_set" => Some(DNSEvent::ZFlagSet),
+            _ => None
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rs_dns_state_get_event_info_by_id(
+    event_id: std::os::raw::c_int,
+    event_name: *mut *const std::os::raw::c_char,
+    event_type: *mut core::AppLayerEventType,
+) -> i8 {
+    if let Some(e) = DNSEvent::from_id(event_id as u32) {
+        unsafe {
+            *event_name = e.to_cstring().as_ptr() as *const std::os::raw::c_char;
+            *event_type = core::APP_LAYER_EVENT_TYPE_TRANSACTION;
+        }
+        return 0;
+    }
+    return -1;
+}
+
+#[no_mangle]
+pub extern "C" fn rs_dns_state_get_event_info(
+    event_name: *const std::os::raw::c_char,
+    event_id: *mut std::os::raw::c_int,
+    event_type: *mut core::AppLayerEventType
+) -> std::os::raw::c_int {
+    if event_name == std::ptr::null() {
+        return -1;
+    }
+
+    let event_name = unsafe { std::ffi::CStr::from_ptr(event_name) };
+    if let Ok(event_name) = event_name.to_str() {
+        if let Some(event) = DNSEvent::from_string(event_name) {
+            unsafe {
+                *event_id = event as std::os::raw::c_int;
+                *event_type = core::APP_LAYER_EVENT_TYPE_TRANSACTION;
+            }
+        } else {
+            // Unknown event...
+            return -1;
+        }
+    } else {
+        // UTF-8 conversion failed. Should not happen.
+        return -1;
+    }
+
+    return 0;
 }
 
 #[derive(Debug,PartialEq)]
+#[repr(C)]
 pub struct DNSHeader {
     pub tx_id: u16,
     pub flags: u16,
@@ -152,12 +232,74 @@ pub struct DNSQueryEntry {
 }
 
 #[derive(Debug,PartialEq)]
+pub struct DNSRDataSOA {
+    /// Primary name server for this zone
+    pub mname: Vec<u8>,
+    /// Authority's mailbox
+    pub rname: Vec<u8>,
+    /// Serial version number
+    pub serial: u32,
+    /// Refresh interval (seconds)
+    pub refresh: u32,
+    /// Retry interval (seconds)
+    pub retry: u32,
+    /// Upper time limit until zone is no longer authoritative (seconds)
+    pub expire: u32,
+    /// Minimum ttl for records in this zone (seconds)
+    pub minimum: u32,
+}
+
+#[derive(Debug,PartialEq)]
+pub struct DNSRDataSSHFP {
+    /// Algorithm number
+    pub algo: u8,
+    /// Fingerprint type
+    pub fp_type: u8,
+    /// Fingerprint
+    pub fingerprint: Vec<u8>,
+}
+
+#[derive(Debug,PartialEq)]
+pub struct DNSRDataSRV {
+    /// Priority
+    pub priority: u16,
+    /// Weight
+    pub weight: u16,
+    /// Port
+    pub port: u16,
+    /// Target
+    pub target: Vec<u8>,
+}
+
+/// Represents RData of various formats
+#[derive(Debug,PartialEq)]
+pub enum DNSRData {
+    // RData is an address
+    A(Vec<u8>),
+    AAAA(Vec<u8>),
+    // RData is a domain name
+    CNAME(Vec<u8>),
+    PTR(Vec<u8>),
+    MX(Vec<u8>),
+    NS(Vec<u8>),
+    // RData is text
+    TXT(Vec<u8>),
+    NULL(Vec<u8>),
+    // RData has several fields
+    SOA(DNSRDataSOA),
+    SRV(DNSRDataSRV),
+    SSHFP(DNSRDataSSHFP),
+    // RData for remaining types is sometimes ignored
+    Unknown(Vec<u8>),
+}
+
+#[derive(Debug,PartialEq)]
 pub struct DNSAnswerEntry {
     pub name: Vec<u8>,
     pub rrtype: u16,
     pub rrclass: u16,
     pub ttl: u32,
-    pub data: Vec<u8>,
+    pub data: DNSRData,
 }
 
 #[derive(Debug)]
@@ -179,11 +321,9 @@ pub struct DNSTransaction {
     pub id: u64,
     pub request: Option<DNSRequest>,
     pub response: Option<DNSResponse>,
-    detect_flags_ts: u64,
-    detect_flags_tc: u64,
-    pub logged: LoggerFlags,
     pub de_state: Option<*mut core::DetectEngineState>,
     pub events: *mut core::AppLayerDecoderEvents,
+    pub tx_data: AppLayerTxData,
 }
 
 impl DNSTransaction {
@@ -193,11 +333,9 @@ impl DNSTransaction {
             id: 0,
             request: None,
             response: None,
-            detect_flags_ts: 0,
-            detect_flags_tc: 0,
-            logged: LoggerFlags::new(),
             de_state: None,
             events: std::ptr::null_mut(),
+            tx_data: AppLayerTxData::new(),
         }
     }
 
@@ -215,10 +353,10 @@ impl DNSTransaction {
 
     /// Get the DNS transactions ID (not the internal tracking ID).
     pub fn tx_id(&self) -> u16 {
-        for request in &self.request {
+        if let &Some(ref request) = &self.request {
             return request.header.tx_id;
         }
-        for response in &self.response {
+        if let &Some(ref response) = &self.response {
             return response.header.tx_id;
         }
 
@@ -229,7 +367,7 @@ impl DNSTransaction {
     /// Get the reply code of the transaction. Note that this will
     /// also return 0 if there is no reply.
     pub fn rcode(&self) -> u16 {
-        for response in &self.response {
+        if let &Some(ref response) = &self.response {
             return response.header.flags & 0x000f;
         }
         return 0;
@@ -243,6 +381,36 @@ impl Drop for DNSTransaction {
     }
 }
 
+struct ConfigTracker {
+    map: HashMap<u16, AppLayerTxConfig>,
+    queue: VecDeque<u16>,
+}
+
+impl ConfigTracker {
+    fn new() -> ConfigTracker {
+        ConfigTracker {
+            map: HashMap::new(),
+            queue: VecDeque::new(),
+        }
+    }
+
+    fn add(&mut self, id: u16, config: AppLayerTxConfig) {
+        // If at size limit, remove the oldest entry.
+        if self.queue.len() > 499 {
+            if let Some(id) = self.queue.pop_front() {
+                self.map.remove(&id);
+            }
+        }
+
+        self.map.insert(id, config);
+        self.queue.push_back(id);
+    }
+
+    fn remove(&mut self, id: &u16) -> Option<AppLayerTxConfig> {
+        self.map.remove(id)
+    }
+}
+
 pub struct DNSState {
     // Internal transaction ID.
     pub tx_id: u64,
@@ -252,8 +420,7 @@ pub struct DNSState {
 
     pub events: u16,
 
-    pub request_buffer: Vec<u8>,
-    pub response_buffer: Vec<u8>,
+    config: Option<ConfigTracker>,
 
     gap: bool,
 }
@@ -265,21 +432,17 @@ impl DNSState {
             tx_id: 0,
             transactions: Vec::new(),
             events: 0,
-            request_buffer: Vec::new(),
-            response_buffer: Vec::new(),
+            config: None,
             gap: false,
         };
     }
 
-    /// Allocate a new state with capacites in the buffers for
-    /// potentially buffering as might be needed in TCP.
     pub fn new_tcp() -> DNSState {
         return DNSState{
             tx_id: 0,
             transactions: Vec::new(),
             events: 0,
-            request_buffer: Vec::with_capacity(0xffff),
-            response_buffer: Vec::with_capacity(0xffff),
+            config: None,
             gap: false,
         };
     }
@@ -292,7 +455,6 @@ impl DNSState {
     }
 
     pub fn free_tx(&mut self, tx_id: u64) {
-        SCLogDebug!("************** Freeing TX with ID {}", tx_id);
         let len = self.transactions.len();
         let mut found = false;
         let mut index = 0;
@@ -354,7 +516,7 @@ impl DNSState {
 
     pub fn parse_request(&mut self, input: &[u8]) -> bool {
         match parser::dns_parse_request(input) {
-            nom::IResult::Done(_, request) => {
+            Ok((_, request)) => {
                 if request.header.flags & 0x8000 != 0 {
                     SCLogDebug!("DNS message is not a request");
                     self.set_event(DNSEvent::NotRequest);
@@ -372,13 +534,13 @@ impl DNSState {
                 self.transactions.push(tx);
                 return true;
             }
-            nom::IResult::Incomplete(_) => {
+            Err(nom::Err::Incomplete(_)) => {
                 // Insufficient data.
                 SCLogDebug!("Insufficient data while parsing DNS request");
                 self.set_event(DNSEvent::MalformedData);
                 return false;
             }
-            nom::IResult::Error(_) => {
+            Err(_) => {
                 // Error, probably malformed data.
                 SCLogDebug!("An error occurred while parsing DNS request");
                 self.set_event(DNSEvent::MalformedData);
@@ -389,7 +551,7 @@ impl DNSState {
 
     pub fn parse_response(&mut self, input: &[u8]) -> bool {
         match parser::dns_parse_response(input) {
-            nom::IResult::Done(_, response) => {
+            Ok((_, response)) => {
 
                 SCLogDebug!("Response header flags: {}", response.header.flags);
 
@@ -405,17 +567,22 @@ impl DNSState {
                 }
 
                 let mut tx = self.new_tx();
+                if let Some(ref mut config) = &mut self.config {
+                    if let Some(config) = config.remove(&response.header.tx_id) {
+                        tx.tx_data.config = config;
+                    }
+                }
                 tx.response = Some(response);
                 self.transactions.push(tx);
                 return true;
             }
-            nom::IResult::Incomplete(_) => {
+            Err(nom::Err::Incomplete(_)) => {
                 // Insufficient data.
                 SCLogDebug!("Insufficient data while parsing DNS response");
                 self.set_event(DNSEvent::MalformedData);
                 return false;
             }
-            nom::IResult::Error(_) => {
+            Err(_) => {
                 // Error, probably malformed data.
                 SCLogDebug!("An error occurred while parsing DNS response");
                 self.set_event(DNSEvent::MalformedData);
@@ -425,123 +592,144 @@ impl DNSState {
     }
 
     /// TCP variation of response request parser to handle the length
-    /// prefix as well as buffering.
-    ///
-    /// Always buffer and read from the buffer. Should optimize to skip
-    /// the buffer if not needed.
+    /// prefix.
     ///
     /// Returns the number of messages parsed.
-    pub fn parse_request_tcp(&mut self, input: &[u8]) -> i8 {
+    pub fn parse_request_tcp(&mut self, input: &[u8]) -> AppLayerResult {
         if self.gap {
-            if probe_tcp(input) {
+            let (is_dns, _, is_incomplete) = probe_tcp(input);
+            if is_dns || is_incomplete {
                 self.gap = false;
             } else {
-                return 0
+                AppLayerResult::ok();
             }
         }
 
-        self.request_buffer.extend_from_slice(input);
-
-        let mut count = 0;
-        while self.request_buffer.len() > 0 {
-            let size = match nom::be_u16(&self.request_buffer) {
-                nom::IResult::Done(_, len) => len,
+        let mut cur_i = input;
+        let mut consumed = 0;
+        while cur_i.len() > 0 {
+            if cur_i.len() == 1 {
+                return AppLayerResult::incomplete(consumed as u32, 2 as u32);
+            }
+            let size = match be_u16(&cur_i) as IResult<&[u8],u16> {
+                Ok((_, len)) => len,
                 _ => 0
             } as usize;
-            SCLogDebug!("Have {} bytes, need {} to parse",
-                        self.request_buffer.len(), size);
-            if size > 0 && self.request_buffer.len() >= size + 2 {
-                let msg: Vec<u8> = self.request_buffer.drain(0..(size + 2))
-                    .collect();
+            SCLogDebug!("[request] Have {} bytes, need {} to parse",
+                        cur_i.len(), size + 2);
+            if size > 0 && cur_i.len() >= size + 2 {
+                let msg = &cur_i[0..(size + 2)];
                 if self.parse_request(&msg[2..]) {
-                    count += 1
+                    cur_i = &cur_i[(size + 2)..];
+                    consumed += size  + 2;
+                } else {
+                    return AppLayerResult::err();
                 }
+            } else if size == 0 {
+                cur_i = &cur_i[2..];
+                consumed += 2;
             } else {
-                SCLogDebug!("Not enough DNS traffic to parse.");
-                break;
+                SCLogDebug!("[request]Not enough DNS traffic to parse. Returning {}/{}",
+                            consumed as u32, (size + 2) as u32);
+                return AppLayerResult::incomplete(consumed as u32,
+                    (size  + 2) as u32);
             }
         }
-        return count;
+        AppLayerResult::ok()
     }
 
     /// TCP variation of the response parser to handle the length
-    /// prefix as well as buffering.
-    ///
-    /// Always buffer and read from the buffer. Should optimize to skip
-    /// the buffer if not needed.
+    /// prefix.
     ///
     /// Returns the number of messages parsed.
-    pub fn parse_response_tcp(&mut self, input: &[u8]) -> i8 {
+    pub fn parse_response_tcp(&mut self, input: &[u8]) -> AppLayerResult {
         if self.gap {
-            if probe_tcp(input) {
+            let (is_dns, _, is_incomplete) = probe_tcp(input);
+            if is_dns || is_incomplete {
                 self.gap = false;
             } else {
-                return 0
+                return AppLayerResult::ok();
             }
         }
 
-        self.response_buffer.extend_from_slice(input);
-
-        let mut count = 0;
-        while self.response_buffer.len() > 0 {
-            let size = match nom::be_u16(&self.response_buffer) {
-                nom::IResult::Done(_, len) => len,
+        let mut cur_i = input;
+        let mut consumed = 0;
+        while cur_i.len() > 0 {
+            if cur_i.len() == 1 {
+                return AppLayerResult::incomplete(consumed as u32, 2 as u32);
+            }
+            let size = match be_u16(&cur_i) as IResult<&[u8],u16> {
+                Ok((_, len)) => len,
                 _ => 0
             } as usize;
-            if size > 0 && self.response_buffer.len() >= size + 2 {
-                let msg: Vec<u8> = self.response_buffer.drain(0..(size + 2))
-                    .collect();
+            SCLogDebug!("[response] Have {} bytes, need {} to parse",
+                        cur_i.len(), size + 2);
+            if size > 0 && cur_i.len() >= size + 2 {
+                let msg = &cur_i[0..(size + 2)];
                 if self.parse_response(&msg[2..]) {
-                    count += 1;
+                    cur_i = &cur_i[(size + 2)..];
+                    consumed += size + 2;
+                } else {
+                    return AppLayerResult::err();
                 }
-            } else {
-                break;
+            } else if size == 0 {
+                cur_i = &cur_i[2..];
+                consumed += 2;
+            } else  {
+                SCLogDebug!("[response]Not enough DNS traffic to parse. Returning {}/{}",
+                    consumed as u32, (cur_i.len() - consumed) as u32);
+                return AppLayerResult::incomplete(consumed as u32,
+                    (size + 2) as u32);
             }
         }
-        return count;
+        AppLayerResult::ok()
     }
 
-    /// A gap has been seen in the request direction. Set the gap flag
-    /// to clear any buffered data.
+    /// A gap has been seen in the request direction. Set the gap flag.
     pub fn request_gap(&mut self, gap: u32) {
         if gap > 0 {
-            self.request_buffer.clear();
             self.gap = true;
         }
     }
 
     /// A gap has been seen in the response direction. Set the gap
-    /// flag to clear any buffered data.
+    /// flag.
     pub fn response_gap(&mut self, gap: u32) {
         if gap > 0 {
-            self.response_buffer.clear();
             self.gap = true;
         }
     }
 }
 
 /// Probe input to see if it looks like DNS.
-fn probe(input: &[u8]) -> bool {
+fn probe(input: &[u8]) -> (bool, bool) {
     match parser::dns_parse_request(input) {
-        nom::IResult::Done(_, _) => true,
-        _ => false
+        Ok((_, request)) => {
+            let is_request = request.header.flags & 0x8000 == 0;
+            return (true, is_request);
+        },
+        Err(_) => (false, false),
     }
 }
 
 /// Probe TCP input to see if it looks like DNS.
-pub fn probe_tcp(input: &[u8]) -> bool {
-    match nom::be_u16(input) {
-        nom::IResult::Done(rem, _) => {
-            return probe(rem);
+pub fn probe_tcp(input: &[u8]) -> (bool, bool, bool) {
+    match be_u16(input) as IResult<&[u8],_> {
+        Ok((rem, _)) => {
+            let r = probe(rem);
+            return (r.0, r.1, false);
         },
+        Err(nom::Err::Incomplete(_)) => {
+            return (false, false, true);
+        }
         _ => {}
     }
-    return false;
+    return (false, false, false);
 }
 
 /// Returns *mut DNSState
 #[no_mangle]
-pub extern "C" fn rs_dns_state_new() -> *mut libc::c_void {
+pub extern "C" fn rs_dns_state_new(_orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto) -> *mut std::os::raw::c_void {
     let state = DNSState::new();
     let boxed = Box::new(state);
     return unsafe{transmute(boxed)};
@@ -549,7 +737,7 @@ pub extern "C" fn rs_dns_state_new() -> *mut libc::c_void {
 
 /// Returns *mut DNSState
 #[no_mangle]
-pub extern "C" fn rs_dns_state_tcp_new() -> *mut libc::c_void {
+pub extern "C" fn rs_dns_state_tcp_new() -> *mut std::os::raw::c_void {
     let state = DNSState::new_tcp();
     let boxed = Box::new(state);
     return unsafe{transmute(boxed)};
@@ -558,60 +746,67 @@ pub extern "C" fn rs_dns_state_tcp_new() -> *mut libc::c_void {
 /// Params:
 /// - state: *mut DNSState as void pointer
 #[no_mangle]
-pub extern "C" fn rs_dns_state_free(state: *mut libc::c_void) {
+pub extern "C" fn rs_dns_state_free(state: *mut std::os::raw::c_void) {
     // Just unbox...
     let _drop: Box<DNSState> = unsafe{transmute(state)};
 }
 
 #[no_mangle]
-pub extern "C" fn rs_dns_state_tx_free(state: &mut DNSState,
-                                       tx_id: libc::uint64_t)
+pub extern "C" fn rs_dns_state_tx_free(state: *mut std::os::raw::c_void,
+                                       tx_id: u64)
 {
+    let state = cast_pointer!(state, DNSState);
     state.free_tx(tx_id);
 }
 
 /// C binding parse a DNS request. Returns 1 on success, -1 on failure.
 #[no_mangle]
-pub extern "C" fn rs_dns_parse_request(_flow: *mut core::Flow,
-                                       state: &mut DNSState,
-                                       _pstate: *mut libc::c_void,
-                                       input: *mut libc::uint8_t,
-                                       input_len: libc::uint32_t,
-                                       _data: *mut libc::c_void)
-                                       -> libc::int8_t {
+pub extern "C" fn rs_dns_parse_request(_flow: *const core::Flow,
+                                        state: *mut std::os::raw::c_void,
+                                       _pstate: *mut std::os::raw::c_void,
+                                       input: *const u8,
+                                       input_len: u32,
+                                       _data: *const std::os::raw::c_void,
+                                       _flags: u8)
+                                       -> AppLayerResult {
+    let state = cast_pointer!(state, DNSState);
     let buf = unsafe{std::slice::from_raw_parts(input, input_len as usize)};
     if state.parse_request(buf) {
-        1
+        AppLayerResult::ok()
     } else {
-        -1
+        AppLayerResult::err()
     }
 }
 
 #[no_mangle]
-pub extern "C" fn rs_dns_parse_response(_flow: *mut core::Flow,
-                                        state: &mut DNSState,
-                                        _pstate: *mut libc::c_void,
-                                        input: *mut libc::uint8_t,
-                                        input_len: libc::uint32_t,
-                                        _data: *mut libc::c_void)
-                                        -> libc::int8_t {
+pub extern "C" fn rs_dns_parse_response(_flow: *const core::Flow,
+                                        state: *mut std::os::raw::c_void,
+                                        _pstate: *mut std::os::raw::c_void,
+                                        input: *const u8,
+                                        input_len: u32,
+                                        _data: *const std::os::raw::c_void,
+                                        _flags: u8)
+                                        -> AppLayerResult {
+    let state = cast_pointer!(state, DNSState);
     let buf = unsafe{std::slice::from_raw_parts(input, input_len as usize)};
     if state.parse_response(buf) {
-        1
+        AppLayerResult::ok()
     } else {
-        -1
+        AppLayerResult::err()
     }
 }
 
 /// C binding parse a DNS request. Returns 1 on success, -1 on failure.
 #[no_mangle]
-pub extern "C" fn rs_dns_parse_request_tcp(_flow: *mut core::Flow,
-                                           state: &mut DNSState,
-                                           _pstate: *mut libc::c_void,
-                                           input: *mut libc::uint8_t,
-                                           input_len: libc::uint32_t,
-                                           _data: *mut libc::c_void)
-                                           -> libc::int8_t {
+pub extern "C" fn rs_dns_parse_request_tcp(_flow: *const core::Flow,
+                                           state: *mut std::os::raw::c_void,
+                                           _pstate: *mut std::os::raw::c_void,
+                                           input: *const u8,
+                                           input_len: u32,
+                                           _data: *const std::os::raw::c_void,
+                                           _flags: u8)
+                                           -> AppLayerResult {
+    let state = cast_pointer!(state, DNSState);
     if input_len > 0 {
         if input != std::ptr::null_mut() {
             let buf = unsafe{
@@ -620,17 +815,19 @@ pub extern "C" fn rs_dns_parse_request_tcp(_flow: *mut core::Flow,
         }
         state.request_gap(input_len);
     }
-    return 0;
+    AppLayerResult::ok()
 }
 
 #[no_mangle]
-pub extern "C" fn rs_dns_parse_response_tcp(_flow: *mut core::Flow,
-                                            state: &mut DNSState,
-                                            _pstate: *mut libc::c_void,
-                                            input: *mut libc::uint8_t,
-                                            input_len: libc::uint32_t,
-                                            _data: *mut libc::c_void)
-                                            -> libc::int8_t {
+pub extern "C" fn rs_dns_parse_response_tcp(_flow: *const core::Flow,
+                                            state: *mut std::os::raw::c_void,
+                                            _pstate: *mut std::os::raw::c_void,
+                                            input: *const u8,
+                                            input_len: u32,
+                                            _data: *const std::os::raw::c_void,
+                                            _flags: u8)
+                                            -> AppLayerResult {
+    let state = cast_pointer!(state, DNSState);
     if input_len > 0 {
         if input != std::ptr::null_mut() {
             let buf = unsafe{
@@ -639,22 +836,13 @@ pub extern "C" fn rs_dns_parse_response_tcp(_flow: *mut core::Flow,
         }
         state.response_gap(input_len);
     }
-    return 0;
+    AppLayerResult::ok()
 }
 
 #[no_mangle]
-pub extern "C" fn rs_dns_state_progress_completion_status(
-    _direction: libc::uint8_t)
-    -> libc::c_int
-{
-    SCLogDebug!("rs_dns_state_progress_completion_status");
-    return 1;
-}
-
-#[no_mangle]
-pub extern "C" fn rs_dns_tx_get_alstate_progress(_tx: &mut DNSTransaction,
-                                                 _direction: libc::uint8_t)
-                                                 -> libc::uint8_t
+pub extern "C" fn rs_dns_tx_get_alstate_progress(_tx: *mut std::os::raw::c_void,
+                                                 _direction: u8)
+                                                 -> std::os::raw::c_int
 {
     // This is a stateless parser, just the existence of a transaction
     // means its complete.
@@ -663,58 +851,20 @@ pub extern "C" fn rs_dns_tx_get_alstate_progress(_tx: &mut DNSTransaction,
 }
 
 #[no_mangle]
-pub extern "C" fn rs_dns_tx_set_detect_flags(tx: &mut DNSTransaction,
-                                             dir: libc::uint8_t,
-                                             flags: libc::uint64_t)
+pub extern "C" fn rs_dns_state_get_tx_count(state: *mut std::os::raw::c_void)
+                                            -> u64
 {
-    if dir & core::STREAM_TOSERVER != 0 {
-        tx.detect_flags_ts = flags as u64;
-    } else {
-        tx.detect_flags_tc = flags as u64;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn rs_dns_tx_get_detect_flags(tx: &mut DNSTransaction,
-                                             dir: libc::uint8_t)
-                                       -> libc::uint64_t
-{
-    if dir & core::STREAM_TOSERVER != 0 {
-        return tx.detect_flags_ts as libc::uint64_t;
-    } else {
-        return tx.detect_flags_tc as libc::uint64_t;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn rs_dns_tx_set_logged(_state: &mut DNSState,
-                                       tx: &mut DNSTransaction,
-                                       logged: libc::uint32_t)
-{
-    tx.logged.set(logged);
-}
-
-#[no_mangle]
-pub extern "C" fn rs_dns_tx_get_logged(_state: &mut DNSState,
-                                       tx: &mut DNSTransaction)
-                                       -> u32
-{
-    return tx.logged.get();
-}
-
-#[no_mangle]
-pub extern "C" fn rs_dns_state_get_tx_count(state: &mut DNSState)
-                                            -> libc::uint64_t
-{
+    let state = cast_pointer!(state, DNSState);
     SCLogDebug!("rs_dns_state_get_tx_count: returning {}", state.tx_id);
     return state.tx_id;
 }
 
 #[no_mangle]
-pub extern "C" fn rs_dns_state_get_tx(state: &mut DNSState,
-                                      tx_id: libc::uint64_t)
-                                      -> *mut DNSTransaction
+pub extern "C" fn rs_dns_state_get_tx(state: *mut std::os::raw::c_void,
+                                      tx_id: u64)
+                                      -> *mut std::os::raw::c_void
 {
+    let state = cast_pointer!(state, DNSState);
     match state.get_tx(tx_id) {
         Some(tx) => {
             return unsafe{transmute(tx)};
@@ -727,17 +877,20 @@ pub extern "C" fn rs_dns_state_get_tx(state: &mut DNSState,
 
 #[no_mangle]
 pub extern "C" fn rs_dns_state_set_tx_detect_state(
-    tx: &mut DNSTransaction,
-    de_state: &mut core::DetectEngineState)
+    tx: *mut std::os::raw::c_void,
+    de_state: &mut core::DetectEngineState) -> std::os::raw::c_int
 {
+    let tx = cast_pointer!(tx, DNSTransaction);
     tx.de_state = Some(de_state);
+    return 0;
 }
 
 #[no_mangle]
 pub extern "C" fn rs_dns_state_get_tx_detect_state(
-    tx: &mut DNSTransaction)
+    tx: *mut std::os::raw::c_void)
     -> *mut core::DetectEngineState
 {
+    let tx = cast_pointer!(tx, DNSTransaction);
     match tx.de_state {
         Some(ds) => {
             return ds;
@@ -749,33 +902,35 @@ pub extern "C" fn rs_dns_state_get_tx_detect_state(
 }
 
 #[no_mangle]
-pub extern "C" fn rs_dns_state_get_events(state: &mut DNSState,
-                                          tx_id: libc::uint64_t)
+pub extern "C" fn rs_dns_state_get_events(tx: *mut std::os::raw::c_void)
                                           -> *mut core::AppLayerDecoderEvents
 {
-    match state.get_tx(tx_id) {
-        Some(tx) => {
-            return tx.events;
-        }
-        _ => {
-            return std::ptr::null_mut();
-        }
-    }
+    let tx = cast_pointer!(tx, DNSTransaction);
+    return tx.events;
+}
+
+#[no_mangle]
+pub extern "C" fn rs_dns_state_get_tx_data(
+    tx: *mut std::os::raw::c_void)
+    -> *mut AppLayerTxData
+{
+    let tx = cast_pointer!(tx, DNSTransaction);
+    return &mut tx.tx_data;
 }
 
 #[no_mangle]
 pub extern "C" fn rs_dns_tx_get_query_name(tx: &mut DNSTransaction,
-                                       i: libc::uint16_t,
-                                       buf: *mut *const libc::uint8_t,
-                                       len: *mut libc::uint32_t)
-                                       -> libc::uint8_t
+                                       i: u16,
+                                       buf: *mut *const u8,
+                                       len: *mut u32)
+                                       -> u8
 {
-    for request in &tx.request {
+    if let &Some(ref request) = &tx.request {
         if (i as usize) < request.queries.len() {
             let query = &request.queries[i as usize];
             if query.name.len() > 0 {
                 unsafe {
-                    *len = query.name.len() as libc::uint32_t;
+                    *len = query.name.len() as u32;
                     *buf = query.name.as_ptr();
                 }
                 return 1;
@@ -789,7 +944,7 @@ pub extern "C" fn rs_dns_tx_get_query_name(tx: &mut DNSTransaction,
 //
 /// extern uint16_t rs_dns_tx_get_tx_id(RSDNSTransaction *);
 #[no_mangle]
-pub extern "C" fn rs_dns_tx_get_tx_id(tx: &mut DNSTransaction) -> libc::uint16_t
+pub extern "C" fn rs_dns_tx_get_tx_id(tx: &mut DNSTransaction) -> u16
 {
     return tx.tx_id()
 }
@@ -799,18 +954,18 @@ pub extern "C" fn rs_dns_tx_get_tx_id(tx: &mut DNSTransaction) -> libc::uint16_t
 /// extern uint16_t rs_dns_tx_get_response_flags(RSDNSTransaction *);
 #[no_mangle]
 pub extern "C" fn rs_dns_tx_get_response_flags(tx: &mut DNSTransaction)
-                                           -> libc::uint16_t
+                                           -> u16
 {
     return tx.rcode();
 }
 
 #[no_mangle]
 pub extern "C" fn rs_dns_tx_get_query_rrtype(tx: &mut DNSTransaction,
-                                         i: libc::uint16_t,
-                                         rrtype: *mut libc::uint16_t)
-                                         -> libc::uint8_t
+                                         i: u16,
+                                         rrtype: *mut u16)
+                                         -> u8
 {
-    for request in &tx.request {
+    if let &Some(ref request) = &tx.request {
         if (i as usize) < request.queries.len() {
             let query = &request.queries[i as usize];
             if query.name.len() > 0 {
@@ -825,36 +980,182 @@ pub extern "C" fn rs_dns_tx_get_query_rrtype(tx: &mut DNSTransaction,
 }
 
 #[no_mangle]
-pub extern "C" fn rs_dns_probe(input: *const libc::uint8_t, len: libc::uint32_t)
-                               -> libc::uint8_t
-{
+pub extern "C" fn rs_dns_probe(
+    _flow: *const core::Flow,
+    _dir: u8,
+    input: *const u8,
+    len: u32,
+    rdir: *mut u8,
+) -> AppProto {
+    if len == 0 || len < std::mem::size_of::<DNSHeader>() as u32 {
+        return core::ALPROTO_UNKNOWN;
+    }
     let slice: &[u8] = unsafe {
         std::slice::from_raw_parts(input as *mut u8, len as usize)
     };
-    if probe(slice) {
-        return 1;
+    let (is_dns, is_request) = probe(slice);
+    if is_dns {
+        let dir = if is_request {
+            core::STREAM_TOSERVER
+        } else {
+            core::STREAM_TOCLIENT
+        };
+        unsafe {
+            *rdir = dir;
+            return ALPROTO_DNS;
+        }
     }
     return 0;
 }
 
 #[no_mangle]
-pub extern "C" fn rs_dns_probe_tcp(input: *const libc::uint8_t,
-                                   len: libc::uint32_t)
-                                   -> libc::uint8_t
-{
+pub extern "C" fn rs_dns_probe_tcp(
+    _flow: *const core::Flow,
+    direction: u8,
+    input: *const u8,
+    len: u32,
+    rdir: *mut u8
+) -> AppProto {
+    if len == 0 || len < std::mem::size_of::<DNSHeader>() as u32 + 2 {
+        return core::ALPROTO_UNKNOWN;
+    }
     let slice: &[u8] = unsafe {
         std::slice::from_raw_parts(input as *mut u8, len as usize)
     };
-    if probe_tcp(slice) {
-        return 1;
+    //is_incomplete is checked by caller
+    let (is_dns, is_request, _) = probe_tcp(slice);
+    if is_dns {
+        let dir = if is_request {
+            core::STREAM_TOSERVER
+        } else {
+            core::STREAM_TOCLIENT
+        };
+        if direction & (core::STREAM_TOSERVER|core::STREAM_TOCLIENT) != dir {
+            unsafe { *rdir = dir };
+        }
+        return unsafe { ALPROTO_DNS };
     }
     return 0;
+}
+
+#[no_mangle]
+pub extern "C" fn rs_dns_apply_tx_config(
+    _state: *mut std::os::raw::c_void, _tx: *mut std::os::raw::c_void,
+    _mode: std::os::raw::c_int, config: AppLayerTxConfig
+) {
+    let tx = cast_pointer!(_tx, DNSTransaction);
+    let state = cast_pointer!(_state, DNSState);
+    if let Some(request) = &tx.request {
+        if state.config.is_none() {
+            state.config = Some(ConfigTracker::new());
+        }
+        if let Some(ref mut tracker) = &mut state.config {
+            tracker.add(request.header.tx_id, config);
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rs_dns_init(proto: AppProto) {
+    ALPROTO_DNS = proto;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rs_dns_udp_register_parser() {
+    let default_port = std::ffi::CString::new("[53]").unwrap();
+    let parser = RustParser{
+        name: b"dns\0".as_ptr() as *const std::os::raw::c_char,
+        default_port: default_port.as_ptr(),
+        ipproto: IPPROTO_UDP,
+        probe_ts: Some(rs_dns_probe),
+        probe_tc: Some(rs_dns_probe),
+        min_depth: 0,
+        max_depth: std::mem::size_of::<DNSHeader>() as u16,
+        state_new: rs_dns_state_new,
+        state_free: rs_dns_state_free,
+        tx_free: rs_dns_state_tx_free,
+        parse_ts: rs_dns_parse_request,
+        parse_tc: rs_dns_parse_response,
+        get_tx_count: rs_dns_state_get_tx_count,
+        get_tx: rs_dns_state_get_tx,
+        tx_comp_st_ts: 1,
+        tx_comp_st_tc: 1,
+        tx_get_progress: rs_dns_tx_get_alstate_progress,
+        get_events: Some(rs_dns_state_get_events),
+        get_eventinfo: Some(rs_dns_state_get_event_info),
+        get_eventinfo_byid: Some(rs_dns_state_get_event_info_by_id),
+        localstorage_new: None,
+        localstorage_free: None,
+        get_files: None,
+        get_tx_iterator: None,
+        get_de_state: rs_dns_state_get_tx_detect_state,
+        set_de_state: rs_dns_state_set_tx_detect_state,
+        get_tx_data: rs_dns_state_get_tx_data,
+        apply_tx_config: Some(rs_dns_apply_tx_config),
+        flags: APP_LAYER_PARSER_OPT_UNIDIR_TXS,
+        truncate: None,
+    };
+
+    let ip_proto_str = CString::new("udp").unwrap();
+    if AppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        let alproto = AppLayerRegisterProtocolDetection(&parser, 1);
+        ALPROTO_DNS = alproto;
+        if AppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+            let _ = AppLayerRegisterParser(&parser, alproto);
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rs_dns_tcp_register_parser() {
+    let default_port = std::ffi::CString::new("53").unwrap();
+    let parser = RustParser{
+        name: b"dns\0".as_ptr() as *const std::os::raw::c_char,
+        default_port: default_port.as_ptr(),
+        ipproto: IPPROTO_TCP,
+        probe_ts: Some(rs_dns_probe_tcp),
+        probe_tc: Some(rs_dns_probe_tcp),
+        min_depth: 0,
+        max_depth: std::mem::size_of::<DNSHeader>() as u16 + 2,
+        state_new: rs_dns_state_new,
+        state_free: rs_dns_state_free,
+        tx_free: rs_dns_state_tx_free,
+        parse_ts: rs_dns_parse_request_tcp,
+        parse_tc: rs_dns_parse_response_tcp,
+        get_tx_count: rs_dns_state_get_tx_count,
+        get_tx: rs_dns_state_get_tx,
+        tx_comp_st_ts: 1,
+        tx_comp_st_tc: 1,
+        tx_get_progress: rs_dns_tx_get_alstate_progress,
+        get_events: Some(rs_dns_state_get_events),
+        get_eventinfo: Some(rs_dns_state_get_event_info),
+        get_eventinfo_byid: Some(rs_dns_state_get_event_info_by_id),
+        localstorage_new: None,
+        localstorage_free: None,
+        get_files: None,
+        get_tx_iterator: None,
+        get_de_state: rs_dns_state_get_tx_detect_state,
+        set_de_state: rs_dns_state_set_tx_detect_state,
+        get_tx_data: rs_dns_state_get_tx_data,
+        apply_tx_config: Some(rs_dns_apply_tx_config),
+        flags: APP_LAYER_PARSER_OPT_ACCEPT_GAPS | APP_LAYER_PARSER_OPT_UNIDIR_TXS,
+        truncate: None,
+    };
+
+    let ip_proto_str = CString::new("tcp").unwrap();
+    if AppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        let alproto = AppLayerRegisterProtocolDetection(&parser, 1);
+        ALPROTO_DNS = alproto;
+        if AppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+            let _ = AppLayerRegisterParser(&parser, alproto);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
 
-    use dns::dns::DNSState;
+    use super::*;
 
     #[test]
     fn test_dns_parse_request_tcp_valid() {
@@ -885,7 +1186,10 @@ mod tests {
         request.extend(dns_payload);
 
         let mut state = DNSState::new();
-        assert_eq!(1, state.parse_request_tcp(&request));
+        assert_eq!(
+            AppLayerResult::ok(),
+            state.parse_request_tcp(&request)
+        );
     }
 
     #[test]
@@ -918,7 +1222,10 @@ mod tests {
         request.extend(dns_payload);
 
         let mut state = DNSState::new();
-        assert_eq!(0, state.parse_request_tcp(&request));
+        assert_eq!(
+            AppLayerResult::incomplete(0, 52),
+            state.parse_request_tcp(&request)
+        );
     }
 
     #[test]
@@ -956,7 +1263,10 @@ mod tests {
         request.extend(dns_payload);
 
         let mut state = DNSState::new();
-        assert_eq!(1, state.parse_response_tcp(&request));
+        assert_eq!(
+            AppLayerResult::ok(),
+            state.parse_response_tcp(&request)
+        );
     }
 
     // Test that a TCP DNS payload won't be parsed if there is not
@@ -997,6 +1307,253 @@ mod tests {
         request.extend(dns_payload);
 
         let mut state = DNSState::new();
-        assert_eq!(0, state.parse_response_tcp(&request));
+        assert_eq!(
+            AppLayerResult::incomplete(0, 103),
+            state.parse_response_tcp(&request)
+        );
+    }
+
+    // Port of the C RustDNSUDPParserTest02 unit test.
+    #[test]
+    fn test_dns_udp_parser_test_01() {
+        /* query: abcdefghijk.com
+         * TTL: 86400
+         * serial 20130422 refresh 28800 retry 7200 exp 604800 min ttl 86400
+         * ns, hostmaster */
+        let buf: &[u8] = &[
+            0x00, 0x3c, 0x85, 0x00, 0x00, 0x01, 0x00, 0x00,
+            0x00, 0x01, 0x00, 0x00, 0x0b, 0x61, 0x62, 0x63,
+            0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b,
+            0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x0f, 0x00,
+            0x01, 0x00, 0x00, 0x06, 0x00, 0x01, 0x00, 0x01,
+            0x51, 0x80, 0x00, 0x25, 0x02, 0x6e, 0x73, 0x00,
+            0x0a, 0x68, 0x6f, 0x73, 0x74, 0x6d, 0x61, 0x73,
+            0x74, 0x65, 0x72, 0xc0, 0x2f, 0x01, 0x33, 0x2a,
+            0x76, 0x00, 0x00, 0x70, 0x80, 0x00, 0x00, 0x1c,
+            0x20, 0x00, 0x09, 0x3a, 0x80, 0x00, 0x01, 0x51,
+            0x80,
+        ];
+        let mut state = DNSState::new();
+        assert!(state.parse_response(buf));
+    }
+
+    // Port of the C RustDNSUDPParserTest02 unit test.
+    #[test]
+    fn test_dns_udp_parser_test_02() {
+        let buf: &[u8] = &[
+            0x6D,0x08,0x84,0x80,0x00,0x01,0x00,0x08,0x00,0x00,0x00,0x01,0x03,0x57,0x57,0x57,
+            0x04,0x54,0x54,0x54,0x54,0x03,0x56,0x56,0x56,0x03,0x63,0x6F,0x6D,0x02,0x79,0x79,
+            0x00,0x00,0x01,0x00,0x01,0xC0,0x0C,0x00,0x05,0x00,0x01,0x00,0x00,0x0E,0x10,0x00,
+            0x02,0xC0,0x0C,0xC0,0x31,0x00,0x05,0x00,0x01,0x00,0x00,0x0E,0x10,0x00,0x02,0xC0,
+            0x31,0xC0,0x3F,0x00,0x05,0x00,0x01,0x00,0x00,0x0E,0x10,0x00,0x02,0xC0,0x3F,0xC0,
+            0x4D,0x00,0x05,0x00,0x01,0x00,0x00,0x0E,0x10,0x00,0x02,0xC0,0x4D,0xC0,0x5B,0x00,
+            0x05,0x00,0x01,0x00,0x00,0x0E,0x10,0x00,0x02,0xC0,0x5B,0xC0,0x69,0x00,0x05,0x00,
+            0x01,0x00,0x00,0x0E,0x10,0x00,0x02,0xC0,0x69,0xC0,0x77,0x00,0x05,0x00,0x01,0x00,
+            0x00,0x0E,0x10,0x00,0x02,0xC0,0x77,0xC0,0x85,0x00,0x05,0x00,0x01,0x00,0x00,0x0E,
+            0x10,0x00,0x02,0xC0,0x85,0x00,0x00,0x29,0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        ];
+        let mut state = DNSState::new();
+        assert!(state.parse_response(buf));
+    }
+
+    // Port of the C RustDNSUDPParserTest03 unit test.
+    #[test]
+    fn test_dns_udp_parser_test_03() {
+        let buf: &[u8] = &[
+            0x6F,0xB4,0x84,0x80,0x00,0x01,0x00,0x02,0x00,0x02,0x00,0x03,0x03,0x57,0x57,0x77,
+            0x0B,0x56,0x56,0x56,0x56,0x56,0x56,0x56,0x56,0x56,0x56,0x56,0x03,0x55,0x55,0x55,
+            0x02,0x79,0x79,0x00,0x00,0x01,0x00,0x01,0xC0,0x0C,0x00,0x05,0x00,0x01,0x00,0x00,
+            0x0E,0x10,0x00,0x02,0xC0,0x10,0xC0,0x34,0x00,0x01,0x00,0x01,0x00,0x00,0x0E,0x10,
+            0x00,0x04,0xC3,0xEA,0x04,0x19,0xC0,0x34,0x00,0x02,0x00,0x01,0x00,0x00,0x0E,0x10,
+            0x00,0x0A,0x03,0x6E,0x73,0x31,0x03,0x61,0x67,0x62,0xC0,0x20,0xC0,0x46,0x00,0x02,
+            0x00,0x01,0x00,0x00,0x0E,0x10,0x00,0x06,0x03,0x6E,0x73,0x32,0xC0,0x56,0xC0,0x52,
+            0x00,0x01,0x00,0x01,0x00,0x00,0x0E,0x10,0x00,0x04,0xC3,0xEA,0x04,0x0A,0xC0,0x68,
+            0x00,0x01,0x00,0x01,0x00,0x00,0x0E,0x10,0x00,0x04,0xC3,0xEA,0x05,0x14,0x00,0x00,
+            0x29,0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+        ];
+        let mut state = DNSState::new();
+        assert!(state.parse_response(buf));
+    }
+
+    // Port of the C RustDNSUDPParserTest04 unit test.
+    //
+    // Test the TXT records in an answer.
+    #[test]
+    fn test_dns_udp_parser_test_04() {
+        let buf: &[u8] = &[
+            0xc2,0x2f,0x81,0x80,0x00,0x01,0x00,0x01,0x00,0x01,0x00,0x01,0x0a,0x41,0x41,0x41,
+            0x41,0x41,0x4f,0x31,0x6b,0x51,0x41,0x05,0x3d,0x61,0x75,0x74,0x68,0x03,0x73,0x72,
+            0x76,0x06,0x74,0x75,0x6e,0x6e,0x65,0x6c,0x03,0x63,0x6f,0x6d,0x00,0x00,0x10,0x00,
+            0x01,
+            /* answer record start */
+            0xc0,0x0c,0x00,0x10,0x00,0x01,0x00,0x00,0x00,0x03,0x00,0x22,
+            /* txt record starts: */
+            0x20, /* <txt len 32 */  0x41,0x68,0x76,0x4d,0x41,0x41,0x4f,0x31,0x6b,0x41,0x46,
+            0x45,0x35,0x54,0x45,0x39,0x51,0x54,0x6a,0x46,0x46,0x4e,0x30,0x39,0x52,0x4e,0x31,
+            0x6c,0x59,0x53,0x44,0x6b,0x00, /* <txt len 0 */   0xc0,0x1d,0x00,0x02,0x00,0x01,
+            0x00,0x09,0x3a,0x80,0x00,0x09,0x06,0x69,0x6f,0x64,0x69,0x6e,0x65,0xc0,0x21,0xc0,
+            0x6b,0x00,0x01,0x00,0x01,0x00,0x09,0x3a,0x80,0x00,0x04,0x0a,0x1e,0x1c,0x5f
+        ];
+        let mut state = DNSState::new();
+        assert!(state.parse_response(buf));
+    }
+
+    // Port of the C RustDNSUDPParserTest05 unit test.
+    //
+    // Test TXT records in answer with a bad length.
+    #[test]
+    fn test_dns_udp_parser_test_05() {
+        let buf: &[u8] = &[
+            0xc2,0x2f,0x81,0x80,0x00,0x01,0x00,0x01,0x00,0x01,0x00,0x01,0x0a,0x41,0x41,0x41,
+            0x41,0x41,0x4f,0x31,0x6b,0x51,0x41,0x05,0x3d,0x61,0x75,0x74,0x68,0x03,0x73,0x72,
+            0x76,0x06,0x74,0x75,0x6e,0x6e,0x65,0x6c,0x03,0x63,0x6f,0x6d,0x00,0x00,0x10,0x00,
+            0x01,
+            /* answer record start */
+            0xc0,0x0c,0x00,0x10,0x00,0x01,0x00,0x00,0x00,0x03,0x00,0x22,
+            /* txt record starts: */
+            0x40, /* <txt len 64 */  0x41,0x68,0x76,0x4d,0x41,0x41,0x4f,0x31,0x6b,0x41,0x46,
+            0x45,0x35,0x54,0x45,0x39,0x51,0x54,0x6a,0x46,0x46,0x4e,0x30,0x39,0x52,0x4e,0x31,
+            0x6c,0x59,0x53,0x44,0x6b,0x00, /* <txt len 0 */   0xc0,0x1d,0x00,0x02,0x00,0x01,
+            0x00,0x09,0x3a,0x80,0x00,0x09,0x06,0x69,0x6f,0x64,0x69,0x6e,0x65,0xc0,0x21,0xc0,
+            0x6b,0x00,0x01,0x00,0x01,0x00,0x09,0x3a,0x80,0x00,0x04,0x0a,0x1e,0x1c,0x5f
+        ];
+        let mut state = DNSState::new();
+        assert!(!state.parse_response(buf));
+    }
+
+    // Port of the C RustDNSTCPParserTestMultiRecord unit test.
+    #[test]
+    fn test_dns_tcp_parser_multi_record() {
+        let buf: &[u8] = &[
+            0x00, 0x1e, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x30,
+            0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
+            0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x00, 0x1e, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x31,
+            0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
+            0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x00, 0x1e, 0x00, 0x02, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x32,
+            0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
+            0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x00, 0x1e, 0x00, 0x03, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x33,
+            0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
+            0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x00, 0x1e, 0x00, 0x04, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x34,
+            0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
+            0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x00, 0x1e, 0x00, 0x05, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x35,
+            0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
+            0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x00, 0x1e, 0x00, 0x06, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x36,
+            0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
+            0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x00, 0x1e, 0x00, 0x07, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x37,
+            0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
+            0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x00, 0x1e, 0x00, 0x08, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x38,
+            0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
+            0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x00, 0x1e, 0x00, 0x09, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x39,
+            0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
+            0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x00, 0x1f, 0x00, 0x0a, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x31,
+            0x30, 0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65,
+            0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00,
+            0x01, 0x00, 0x1f, 0x00, 0x0b, 0x01, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+            0x31, 0x31, 0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c,
+            0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01,
+            0x00, 0x01, 0x00, 0x1f, 0x00, 0x0c, 0x01, 0x00,
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x02, 0x31, 0x32, 0x06, 0x67, 0x6f, 0x6f, 0x67,
+            0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00,
+            0x01, 0x00, 0x01, 0x00, 0x1f, 0x00, 0x0d, 0x01,
+            0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x02, 0x31, 0x33, 0x06, 0x67, 0x6f, 0x6f,
+            0x67, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00,
+            0x00, 0x01, 0x00, 0x01, 0x00, 0x1f, 0x00, 0x0e,
+            0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x02, 0x31, 0x34, 0x06, 0x67, 0x6f,
+            0x6f, 0x67, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d,
+            0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x1f, 0x00,
+            0x0f, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x02, 0x31, 0x35, 0x06, 0x67,
+            0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03, 0x63, 0x6f,
+            0x6d, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x1f,
+            0x00, 0x10, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x02, 0x31, 0x36, 0x06,
+            0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03, 0x63,
+            0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+            0x1f, 0x00, 0x11, 0x01, 0x00, 0x00, 0x01, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x31, 0x37,
+            0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
+            0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x00, 0x1f, 0x00, 0x12, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x31,
+            0x38, 0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65,
+            0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00,
+            0x01, 0x00, 0x1f, 0x00, 0x13, 0x01, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+            0x31, 0x39, 0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c,
+            0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01,
+            0x00, 0x01
+        ];
+        let mut state = DNSState::new();
+        assert_eq!(
+            AppLayerResult::ok(),
+            state.parse_request_tcp(buf)
+        );
+    }
+
+    #[test]
+    fn test_dns_tcp_parser_split_payload() {
+        /* incomplete payload */
+        let buf1: &[u8] = &[
+            0x00, 0x1c, 0x10, 0x32, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        ];
+        /* complete payload plus the start of a new payload */
+        let buf2: &[u8] = &[
+            0x00, 0x1c, 0x10, 0x32, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x06, 0x67, 0x6F, 0x6F, 0x67, 0x6C, 0x65, 0x03,
+            0x63, 0x6F, 0x6D, 0x00, 0x00, 0x10, 0x00, 0x01,
+
+            // next.
+            0x00, 0x1c, 0x10, 0x32, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        /* and the complete payload again with no trailing data. */
+        let buf3: &[u8] = &[
+            0x00, 0x1c, 0x10, 0x32, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x06, 0x67, 0x6F, 0x6F, 0x67, 0x6C, 0x65, 0x03,
+            0x63, 0x6F, 0x6D, 0x00, 0x00, 0x10, 0x00, 0x01,
+        ];
+
+        let mut state = DNSState::new();
+        assert_eq!(
+            AppLayerResult::incomplete(0, 30),
+            state.parse_request_tcp(buf1)
+        );
+        assert_eq!(
+            AppLayerResult::incomplete(30, 30),
+            state.parse_request_tcp(buf2)
+        );
+        assert_eq!(
+            AppLayerResult::ok(),
+            state.parse_request_tcp(buf3)
+        );
     }
 }

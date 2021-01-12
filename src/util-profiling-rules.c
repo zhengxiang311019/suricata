@@ -81,9 +81,7 @@ extern int profiling_output_to_file;
 int profiling_rules_enabled = 0;
 static char profiling_file_name[PATH_MAX] = "";
 static const char *profiling_file_mode = "a";
-#ifdef HAVE_LIBJANSSON
 static int profiling_rule_json = 0;
-#endif
 
 /**
  * Sort orders for dumping profiled rules.
@@ -160,7 +158,7 @@ void SCProfilingRulesGlobalInit(void)
 
             val = ConfNodeLookupChildValue(conf, "limit");
             if (val != NULL) {
-                if (ByteExtractStringUint32(&profiling_rules_limit, 10,
+                if (StringParseUint32(&profiling_rules_limit, 10,
                             (uint16_t)strlen(val), val) <= 0) {
                     SCLogError(SC_ERR_INVALID_ARGUMENT, "Invalid limit: %s", val);
                     exit(EXIT_FAILURE);
@@ -185,11 +183,7 @@ void SCProfilingRulesGlobalInit(void)
                 profiling_output_to_file = 1;
             }
             if (ConfNodeChildValueIsTrue(conf, "json")) {
-#ifdef HAVE_LIBJANSSON
                 profiling_rule_json = 1;
-#else
-                SCLogWarning(SC_ERR_NO_JSON_SUPPORT, "no json support compiled in, using plain output");
-#endif
             }
         }
     }
@@ -294,8 +288,6 @@ SCProfileSummarySortByMaxTicks(const void *a, const void *b)
         return s0->max > s1->max ? -1 : 1;
 }
 
-#ifdef HAVE_LIBJANSSON
-
 static void DumpJson(FILE *fp, SCProfileSummary *summary,
         uint32_t count, uint64_t total_ticks,
         const char *sort_desc)
@@ -358,8 +350,6 @@ static void DumpJson(FILE *fp, SCProfileSummary *summary,
     free(js_s);
     json_decref(js);
 }
-
-#endif /* HAVE_LIBJANSSON */
 
 static void DumpText(FILE *fp, SCProfileSummary *summary,
         uint32_t count, uint64_t total_ticks,
@@ -530,12 +520,9 @@ SCProfilingRuleDump(SCProfileDetectCtx *rules_ctx)
                 sort_desc = "average ticks (no match)";
                 break;
         }
-#ifdef HAVE_LIBJANSSON
         if (profiling_rule_json) {
             DumpJson(fp, summary, count, total_ticks, sort_desc);
-        } else
-#endif
-        {
+        } else {
             DumpText(fp, summary, count, total_ticks, sort_desc);
         }
         order++;
@@ -590,9 +577,8 @@ static SCProfileDetectCtx *SCProfilingRuleInitCtx(void)
         memset(ctx, 0x00, sizeof(SCProfileDetectCtx));
 
         if (pthread_mutex_init(&ctx->data_m, NULL) != 0) {
-            SCLogError(SC_ERR_MUTEX,
-                    "Failed to initialize hash table mutex.");
-            exit(EXIT_FAILURE);
+                    FatalError(SC_ERR_FATAL,
+                               "Failed to initialize hash table mutex.");
         }
     }
 

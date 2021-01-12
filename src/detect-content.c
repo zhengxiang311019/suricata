@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2014 Open Information Security Foundation
+/* Copyright (C) 2007-2019 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -50,17 +50,21 @@
 #include "util-profiling.h"
 #include "detect-dsize.h"
 
+#ifdef UNITTESTS
 static void DetectContentRegisterTests(void);
+#endif
 
 void DetectContentRegister (void)
 {
     sigmatch_table[DETECT_CONTENT].name = "content";
     sigmatch_table[DETECT_CONTENT].desc = "match on payload content";
-    sigmatch_table[DETECT_CONTENT].url = DOC_URL DOC_VERSION "/rules/payload-keywords.html#content";
+    sigmatch_table[DETECT_CONTENT].url = "/rules/payload-keywords.html#content";
     sigmatch_table[DETECT_CONTENT].Match = NULL;
     sigmatch_table[DETECT_CONTENT].Setup = DetectContentSetup;
     sigmatch_table[DETECT_CONTENT].Free  = DetectContentFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_CONTENT].RegisterTests = DetectContentRegisterTests;
+#endif
     sigmatch_table[DETECT_CONTENT].flags = (SIGMATCH_QUOTES_MANDATORY|SIGMATCH_HANDLE_NEGATION);
 }
 
@@ -140,7 +144,7 @@ int DetectContentDataParse(const char *keyword, const char *contentstr,
                     }
                     else if (str[i] != ',') {
                         SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid hex code in "
-                                    "content - %s, hex %c. Invalidating signature", str, str[i]);
+                                    "content - %s, hex %c. Invalidating signature.", str, str[i]);
                         goto error;
                     }
                 } else if (escape) {
@@ -152,13 +156,13 @@ int DetectContentDataParse(const char *keyword, const char *contentstr,
                         str[x] = str[i];
                         x++;
                     } else {
-                        //SCLogDebug("Can't escape %c", str[i]);
+                        SCLogError(SC_ERR_INVALID_SIGNATURE, "'%c' has to be escaped", str[i-1]);
                         goto error;
                     }
                     escape = 0;
                     converted = 1;
                 } else if (str[i] == '"') {
-                    SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid unescaped double quote within content section");
+                    SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid unescaped double quote within content section.");
                     goto error;
                 } else {
                     str[x] = str[i];
@@ -169,7 +173,7 @@ int DetectContentDataParse(const char *keyword, const char *contentstr,
 
         if (bin_count % 2 != 0) {
             SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid hex code assembly in "
-                       "%s - %s.  Invalidating signature", keyword, contentstr);
+                       "%s - %s.  Invalidating signature.", keyword, contentstr);
             goto error;
         }
 
@@ -335,6 +339,17 @@ int DetectContentSetup(DetectEngineCtx *de_ctx, Signature *s, const char *conten
     int sm_list = s->init_data->list;
     if (sm_list == DETECT_SM_LIST_NOTSET) {
         sm_list = DETECT_SM_LIST_PMATCH;
+    } else if (sm_list > DETECT_SM_LIST_MAX &&
+            0 == (cd->flags & DETECT_CONTENT_NEGATED)) {
+        /* Check transform compatibility */
+        const char *tstr;
+        if (!DetectBufferTypeValidateTransform(de_ctx, sm_list, cd->content,
+                    cd->content_len, &tstr)) {
+            SCLogError(SC_ERR_INVALID_SIGNATURE,
+                    "content string \"%s\" incompatible with %s transform",
+                    contentstr, tstr);
+            goto error;
+        }
     }
 
     sm = SigMatchAlloc();
@@ -347,7 +362,7 @@ int DetectContentSetup(DetectEngineCtx *de_ctx, Signature *s, const char *conten
     return 0;
 
 error:
-    DetectContentFree(cd);
+    DetectContentFree(de_ctx, cd);
     return -1;
 }
 
@@ -356,7 +371,7 @@ error:
  *
  * \param cd pointer to DetectContentData
  */
-void DetectContentFree(void *ptr)
+void DetectContentFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     SCEnter();
     DetectContentData *cd = (DetectContentData *)ptr;
@@ -374,7 +389,7 @@ void DetectContentFree(void *ptr)
  *  \retval 1 valid
  *  \retval 0 invalid
  */
-_Bool DetectContentPMATCHValidateCallback(const Signature *s)
+bool DetectContentPMATCHValidateCallback(const Signature *s)
 {
     if (!(s->flags & SIG_FLAG_DSIZE)) {
         return TRUE;
@@ -395,13 +410,13 @@ _Bool DetectContentPMATCHValidateCallback(const Signature *s)
         uint32_t right_edge = cd->content_len + cd->offset;
         if (cd->content_len > max_right_edge) {
             SCLogError(SC_ERR_INVALID_SIGNATURE,
-                    "signature can't match as content length %u is bigger than dsize %u",
+                    "signature can't match as content length %u is bigger than dsize %u.",
                     cd->content_len, max_right_edge);
             return FALSE;
         }
         if (right_edge > max_right_edge) {
             SCLogError(SC_ERR_INVALID_SIGNATURE,
-                    "signature can't match as content length %u with offset %u (=%u) is bigger than dsize %u",
+                    "signature can't match as content length %u with offset %u (=%u) is bigger than dsize %u.",
                     cd->content_len, cd->offset, right_edge, max_right_edge);
             return FALSE;
         }
@@ -484,7 +499,11 @@ void DetectContentPropagateLimits(Signature *s)
                     SCLogDebug("stored: offset %u depth %u offset_plus_pat %u", offset, depth, offset_plus_pat);
 
                     if (cd->flags & DETECT_CONTENT_DISTANCE && cd->distance >= 0) {
-                        offset = cd->offset = offset_plus_pat + cd->distance;
+                        if ((uint32_t)offset_plus_pat + cd->distance <= UINT16_MAX) {
+                            offset = cd->offset = offset_plus_pat + cd->distance;
+                        } else {
+                            SCLogDebug("not updated content offset as it would overflow : %u + %d", offset_plus_pat, cd->distance);
+                        }
                         SCLogDebug("updated content to have offset %u", cd->offset);
                     }
                     if (have_anchor && !last_reset && offset_plus_pat && cd->flags & DETECT_CONTENT_WITHIN && cd->within >= 0) {
@@ -534,7 +553,11 @@ void DetectContentPropagateLimits(Signature *s)
                             (cd->flags & (DETECT_CONTENT_DEPTH|DETECT_CONTENT_OFFSET|DETECT_CONTENT_WITHIN|DETECT_CONTENT_DISTANCE)) == (DETECT_CONTENT_DISTANCE)) {
                         if (cd->distance >= 0) {
                             // only distance
-                            offset = cd->offset = offset_plus_pat + cd->distance;
+                            if ((uint32_t)offset_plus_pat + cd->distance <= UINT16_MAX) {
+                                offset = cd->offset = offset_plus_pat + cd->distance;
+                            } else {
+                                SCLogDebug("not updated content offset as it would overflow : %u + %d", offset_plus_pat, cd->distance);
+                            }
                             offset_plus_pat = offset + cd->content_len;
                             SCLogDebug("offset %u offset_plus_pat %u", offset, offset_plus_pat);
                         }
@@ -699,6 +722,8 @@ static int DetectContentDepthTest01(void)
     // hi end: depth '13' (4+9) + distance 55 = 68 + within 2 = 70
     TEST_RUN("content:\"=\"; offset:4; depth:9; content:\"=&\"; distance:55; within:2;", 60, 70);
 
+    TEST_RUN("content:\"0123456789\"; content:\"abcdef\"; distance:2147483647;", 10, 0);
+
     TEST_DONE;
 }
 
@@ -753,7 +778,7 @@ static int DetectContentParseTest01 (void)
             PrintRawUriFp(stdout,cd->content,cd->content_len);
             SCLogDebug(": ");
             result = 0;
-            DetectContentFree(cd);
+            DetectContentFree(NULL, cd);
         }
     } else {
         SCLogDebug("expected %s got NULL: ", teststringparsed);
@@ -784,7 +809,7 @@ static int DetectContentParseTest02 (void)
             PrintRawUriFp(stdout,cd->content,cd->content_len);
             SCLogDebug(": ");
             result = 0;
-            DetectContentFree(cd);
+            DetectContentFree(NULL, cd);
         }
     } else {
         SCLogDebug("expected %s got NULL: ", teststringparsed);
@@ -815,7 +840,7 @@ static int DetectContentParseTest03 (void)
             PrintRawUriFp(stdout,cd->content,cd->content_len);
             SCLogDebug(": ");
             result = 0;
-            DetectContentFree(cd);
+            DetectContentFree(NULL, cd);
         }
     } else {
         SCLogDebug("expected %s got NULL: ", teststringparsed);
@@ -847,7 +872,7 @@ static int DetectContentParseTest04 (void)
             PrintRawUriFp(stdout,cd->content,cd->content_len);
             SCLogDebug(": ");
             result = 0;
-            DetectContentFree(cd);
+            DetectContentFree(NULL, cd);
         }
     } else {
         SCLogDebug("expected %s got NULL: ", teststringparsed);
@@ -876,7 +901,7 @@ static int DetectContentParseTest05 (void)
         PrintRawUriFp(stdout,cd->content,cd->content_len);
         SCLogDebug(": ");
         result = 0;
-        DetectContentFree(cd);
+        DetectContentFree(NULL, cd);
     }
     SpmDestroyGlobalThreadCtx(spm_global_thread_ctx);
     return result;
@@ -904,7 +929,7 @@ static int DetectContentParseTest06 (void)
             PrintRawUriFp(stdout,cd->content,cd->content_len);
             SCLogDebug(": ");
             result = 0;
-            DetectContentFree(cd);
+            DetectContentFree(NULL, cd);
         }
     } else {
         SCLogDebug("expected %s got NULL: ", teststringparsed);
@@ -931,7 +956,7 @@ static int DetectContentParseTest07 (void)
     if (cd != NULL) {
         SCLogDebug("expected NULL got %p: ", cd);
         result = 0;
-        DetectContentFree(cd);
+        DetectContentFree(NULL, cd);
     }
     SpmDestroyGlobalThreadCtx(spm_global_thread_ctx);
     return result;
@@ -954,7 +979,7 @@ static int DetectContentParseTest08 (void)
     if (cd != NULL) {
         SCLogDebug("expected NULL got %p: ", cd);
         result = 0;
-        DetectContentFree(cd);
+        DetectContentFree(NULL, cd);
     }
     SpmDestroyGlobalThreadCtx(spm_global_thread_ctx);
     return result;
@@ -987,7 +1012,7 @@ static int DetectContentLongPatternMatchTest(uint8_t *raw_eth_pkt, uint16_t pkts
     memset(&th_v, 0, sizeof(th_v));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeEthernet(&th_v, &dtv, p, raw_eth_pkt, pktsize, NULL);
+    DecodeEthernet(&th_v, &dtv, p, raw_eth_pkt, pktsize);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -1241,7 +1266,7 @@ static int DetectContentParseTest09(void)
 
     cd = DetectContentParse(spm_global_thread_ctx, teststring);
     FAIL_IF_NULL(cd);
-    DetectContentFree(cd);
+    DetectContentFree(NULL, cd);
     SpmDestroyGlobalThreadCtx(spm_global_thread_ctx);
     PASS;
 }
@@ -1286,12 +1311,13 @@ static int DetectContentParseTest18(void)
         goto end;
     }
 
-    s->alproto = ALPROTO_DCERPC;
+    if (DetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0)
+        goto end;
 
     result &= (DetectContentSetup(de_ctx, s, "one") == 0);
     result &= (s->sm_lists[g_dce_stub_data_buffer_id] == NULL && s->sm_lists[DETECT_SM_LIST_PMATCH] != NULL);
 
-    SigFree(s);
+    SigFree(de_ctx, s);
 
     s = SigAlloc();
     if (s == NULL)
@@ -1301,7 +1327,7 @@ static int DetectContentParseTest18(void)
     result &= (s->sm_lists[g_dce_stub_data_buffer_id] == NULL && s->sm_lists[DETECT_SM_LIST_PMATCH] != NULL);
 
  end:
-    SigFree(s);
+    SigFree(de_ctx, s);
     DetectEngineCtxFree(de_ctx);
 
     return result;
@@ -2196,45 +2222,33 @@ end:
 static int SigTestPositiveTestContent(const char *rule, uint8_t *buf)
 {
     uint16_t buflen = strlen((char *)buf);
-    Packet *p = NULL;
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
-    int result = 0;
 
     memset(&th_v, 0, sizeof(th_v));
-    p = UTHBuildPacket(buf, buflen, IPPROTO_TCP);
+    Packet *p = UTHBuildPacket(buf, buflen, IPPROTO_TCP);
+    FAIL_IF_NULL(p);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
-
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
 
     de_ctx->sig_list = SigInit(de_ctx, rule);
-    if (de_ctx->sig_list == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx->sig_list);
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
+    FAIL_IF_NULL(det_ctx);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-    if (PacketAlertCheck(p, 1) != 1) {
-        goto end;
-    }
 
-    result = 1;
-end:
-    if (de_ctx != NULL) {
-        SigGroupCleanup(de_ctx);
-        SigCleanSignatures(de_ctx);
+    FAIL_IF(PacketAlertCheck(p, 1) != 1);
 
-        DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-        DetectEngineCtxFree(de_ctx);
-    }
+    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
 
     UTHFreePackets(&p, 1);
-    return result;
+    PASS;
 }
 
 /**
@@ -2343,7 +2357,7 @@ static int DetectContentParseTest41(void)
 
     SpmDestroyGlobalThreadCtx(spm_global_thread_ctx);
     SCFree(teststring);
-    DetectContentFree(cd);
+    DetectContentFree(NULL, cd);
     return result;
 }
 
@@ -2376,7 +2390,7 @@ static int DetectContentParseTest42(void)
 
     SpmDestroyGlobalThreadCtx(spm_global_thread_ctx);
     SCFree(teststring);
-    DetectContentFree(cd);
+    DetectContentFree(NULL, cd);
     return result;
 }
 
@@ -2410,7 +2424,7 @@ static int DetectContentParseTest43(void)
 
     SpmDestroyGlobalThreadCtx(spm_global_thread_ctx);
     SCFree(teststring);
-    DetectContentFree(cd);
+    DetectContentFree(NULL, cd);
     return result;
 }
 
@@ -2447,7 +2461,7 @@ static int DetectContentParseTest44(void)
 
     SpmDestroyGlobalThreadCtx(spm_global_thread_ctx);
     SCFree(teststring);
-    DetectContentFree(cd);
+    DetectContentFree(NULL, cd);
     return result;
 }
 
@@ -2522,7 +2536,11 @@ end:
  */
 static int SigTest41TestNegatedContent(void)
 {
-    return SigTestPositiveTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:!\"GES\"; sid:1;)", (uint8_t *)"GET /one/ HTTP/1.1\r\n Host: one.example.org\r\n\r\n\r\nGET /two/ HTTP/1.1\r\nHost: two.example.org\r\n\r\n\r\n");
+    return SigTestPositiveTestContent("alert tcp any any -> any any "
+            "(msg:\"HTTP URI cap\"; content:!\"GES\"; sid:1;)",
+
+            (uint8_t *)"GET /one/ HTTP/1.1\r\n Host: one.example.org\r\n\r\n\r\n"
+            "GET /two/ HTTP/1.1\r\nHost: two.example.org\r\n\r\n\r\n");
 }
 
 /**
@@ -2988,14 +3006,11 @@ static int DetectLongContentTest3(void)
     return !DetectLongContentTestCommon(sig, 1);
 }
 
-#endif /* UNITTESTS */
-
 /**
  * \brief this function registers unit tests for DetectContent
  */
 static void DetectContentRegisterTests(void)
 {
-#ifdef UNITTESTS /* UNITTESTS */
     g_file_data_buffer_id = DetectBufferTypeGetByName("file_data");
     g_dce_stub_data_buffer_id = DetectBufferTypeGetByName("dce_stub_data");
 
@@ -3109,5 +3124,5 @@ static void DetectContentRegisterTests(void)
     UtRegisterTest("DetectLongContentTest1", DetectLongContentTest1);
     UtRegisterTest("DetectLongContentTest2", DetectLongContentTest2);
     UtRegisterTest("DetectLongContentTest3", DetectLongContentTest3);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

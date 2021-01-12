@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -40,14 +40,15 @@
 
 #define PARSE_REGEX "\\S[A-z]"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
-static int DetectIpOptsMatch (ThreadVars *, DetectEngineThreadCtx *, Packet *,
+static int DetectIpOptsMatch (DetectEngineThreadCtx *, Packet *,
         const Signature *, const SigMatchCtx *);
 static int DetectIpOptsSetup (DetectEngineCtx *, Signature *, const char *);
-void IpOptsRegisterTests(void);
-void DetectIpOptsFree(void *);
+#ifdef UNITTESTS
+static void IpOptsRegisterTests(void);
+#endif
+void DetectIpOptsFree(DetectEngineCtx *, void *);
 
 /**
  * \brief Registration function for ipopts: keyword
@@ -56,13 +57,14 @@ void DetectIpOptsRegister (void)
 {
     sigmatch_table[DETECT_IPOPTS].name = "ipopts";
     sigmatch_table[DETECT_IPOPTS].desc = "check if a specific IP option is set";
-    sigmatch_table[DETECT_IPOPTS].url = DOC_URL DOC_VERSION "/rules/header-keywords.html#ipopts";
+    sigmatch_table[DETECT_IPOPTS].url = "/rules/header-keywords.html#ipopts";
     sigmatch_table[DETECT_IPOPTS].Match = DetectIpOptsMatch;
     sigmatch_table[DETECT_IPOPTS].Setup = DetectIpOptsSetup;
     sigmatch_table[DETECT_IPOPTS].Free  = DetectIpOptsFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_IPOPTS].RegisterTests = IpOptsRegisterTests;
-
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+#endif
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 /**
@@ -99,7 +101,7 @@ struct DetectIpOpts_ {
  * \retval 0 no match
  * \retval 1 match
  */
-static int DetectIpOptsMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx, Packet *p,
+static int DetectIpOptsMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
         const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectIpOptsData *de = (const DetectIpOptsData *)ctx;
@@ -127,11 +129,10 @@ static DetectIpOptsData *DetectIpOptsParse (const char *rawstr)
 {
     int i;
     DetectIpOptsData *de = NULL;
-#define MAX_SUBSTRINGS 30
     int ret = 0, found = 0;
     int ov[MAX_SUBSTRINGS];
 
-    ret = pcre_exec(parse_regex, parse_regex_study, rawstr, strlen(rawstr), 0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, rawstr, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 1) {
         SCLogError(SC_ERR_PCRE_MATCH, "pcre_exec parse error, ret %" PRId32 ", string %s", ret, rawstr);
         goto error;
@@ -204,7 +205,7 @@ error:
  *
  * \param de pointer to DetectIpOptsData
  */
-void DetectIpOptsFree(void *de_ptr)
+void DetectIpOptsFree(DetectEngineCtx *de_ctx, void *de_ptr)
 {
     DetectIpOptsData *de = (DetectIpOptsData *)de_ptr;
     if(de) SCFree(de);
@@ -226,7 +227,7 @@ static int IpOptsTestParse01 (void)
     DetectIpOptsData *de = NULL;
     de = DetectIpOptsParse("lsrr");
     if (de) {
-        DetectIpOptsFree(de);
+        DetectIpOptsFree(NULL, de);
         return 1;
     }
 
@@ -244,7 +245,7 @@ static int IpOptsTestParse02 (void)
     DetectIpOptsData *de = NULL;
     de = DetectIpOptsParse("invalidopt");
     if (de) {
-        DetectIpOptsFree(de);
+        DetectIpOptsFree(NULL, de);
         return 0;
     }
 
@@ -287,7 +288,7 @@ static int IpOptsTestParse03 (void)
     sm->type = DETECT_IPOPTS;
     sm->ctx = (SigMatchCtx *)de;
 
-    ret = DetectIpOptsMatch(&tv, NULL, p, NULL, sm->ctx);
+    ret = DetectIpOptsMatch(NULL, p, NULL, sm->ctx);
 
     if(ret) {
         SCFree(p);
@@ -337,7 +338,7 @@ static int IpOptsTestParse04 (void)
     sm->type = DETECT_IPOPTS;
     sm->ctx = (SigMatchCtx *)de;
 
-    ret = DetectIpOptsMatch(&tv, NULL, p, NULL, sm->ctx);
+    ret = DetectIpOptsMatch(NULL, p, NULL, sm->ctx);
 
     if(ret) {
         SCFree(p);
@@ -351,17 +352,15 @@ error:
     SCFree(p);
     return 1;
 }
-#endif /* UNITTESTS */
 
 /**
  * \brief this function registers unit tests for IpOpts
  */
 void IpOptsRegisterTests(void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("IpOptsTestParse01", IpOptsTestParse01);
     UtRegisterTest("IpOptsTestParse02", IpOptsTestParse02);
     UtRegisterTest("IpOptsTestParse03", IpOptsTestParse03);
     UtRegisterTest("IpOptsTestParse04", IpOptsTestParse04);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

@@ -44,8 +44,14 @@
 
 static IPPair *IPPairGetUsedIPPair(void);
 
+/** ippair hash table */
+IPPairHashRow *ippair_hash;
 /** queue with spare ippairs */
 static IPPairQueue ippair_spare_q;
+IPPairConfig ippair_config;
+SC_ATOMIC_DECLARE(uint64_t,ippair_memuse);
+SC_ATOMIC_DECLARE(uint32_t,ippair_counter);
+SC_ATOMIC_DECLARE(uint32_t,ippair_prune_idx);
 
 /** size of the ippair object. Maybe updated in IPPairInitConfig to include
  *  the storage APIs additions. */
@@ -125,8 +131,6 @@ void IPPairFree(IPPair *h)
 {
     if (h != NULL) {
         IPPairClearMemory(h);
-
-        SC_ATOMIC_DESTROY(h->use_cnt);
         SCMutexDestroy(&h->m);
         SCFree(h);
         (void) SC_ATOMIC_SUB(ippair_memuse, g_ippair_size);
@@ -200,7 +204,7 @@ void IPPairInitConfig(char quiet)
     }
     if ((ConfGet("ippair.hash-size", &conf_val)) == 1)
     {
-        if (ByteExtractStringUint32(&configval, 10, strlen(conf_val),
+        if (StringParseUint32(&configval, 10, strlen(conf_val),
                                     conf_val) > 0) {
             ippair_config.hash_size = configval;
         }
@@ -208,7 +212,7 @@ void IPPairInitConfig(char quiet)
 
     if ((ConfGet("ippair.prealloc", &conf_val)) == 1)
     {
-        if (ByteExtractStringUint32(&configval, 10, strlen(conf_val),
+        if (StringParseUint32(&configval, 10, strlen(conf_val),
                                     conf_val) > 0) {
             ippair_config.prealloc = configval;
         } else {
@@ -232,8 +236,8 @@ void IPPairInitConfig(char quiet)
     }
     ippair_hash = SCMallocAligned(ippair_config.hash_size * sizeof(IPPairHashRow), CLS);
     if (unlikely(ippair_hash == NULL)) {
-        SCLogError(SC_ERR_FATAL, "Fatal error encountered in IPPairInitConfig. Exiting...");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL,
+                   "Fatal error encountered in IPPairInitConfig. Exiting...");
     }
     memset(ippair_hash, 0, ippair_config.hash_size * sizeof(IPPairHashRow));
 
@@ -323,12 +327,6 @@ void IPPairShutdown(void)
     }
     (void) SC_ATOMIC_SUB(ippair_memuse, ippair_config.hash_size * sizeof(IPPairHashRow));
     IPPairQueueDestroy(&ippair_spare_q);
-
-    SC_ATOMIC_DESTROY(ippair_prune_idx);
-    SC_ATOMIC_DESTROY(ippair_memuse);
-    SC_ATOMIC_DESTROY(ippair_counter);
-    SC_ATOMIC_DESTROY(ippair_config.memcap);
-    //SC_ATOMIC_DESTROY(flow_flags);
     return;
 }
 

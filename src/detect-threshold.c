@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -59,15 +59,17 @@
 #include "util-cpu.h"
 #endif
 
-#define PARSE_REGEX "^\\s*(track|type|count|seconds)\\s+(limit|both|threshold|by_dst|by_src|\\d+)\\s*,\\s*(track|type|count|seconds)\\s+(limit|both|threshold|by_dst|by_src|\\d+)\\s*,\\s*(track|type|count|seconds)\\s+(limit|both|threshold|by_dst|by_src|\\d+)\\s*,\\s*(track|type|count|seconds)\\s+(limit|both|threshold|by_dst|by_src|\\d+)\\s*"
+#define PARSE_REGEX "^\\s*(track|type|count|seconds)\\s+(limit|both|threshold|by_dst|by_src|by_both|by_rule|\\d+)\\s*,\\s*(track|type|count|seconds)\\s+(limit|both|threshold|by_dst|by_src|by_both|by_rule|\\d+)\\s*,\\s*(track|type|count|seconds)\\s+(limit|both|threshold|by_dst|by_src|by_both|by_rule|\\d+)\\s*,\\s*(track|type|count|seconds)\\s+(limit|both|threshold|by_dst|by_src|by_both|by_rule|\\d+)\\s*"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
-static int DetectThresholdMatch(ThreadVars *, DetectEngineThreadCtx *, Packet *,
+static int DetectThresholdMatch(DetectEngineThreadCtx *, Packet *,
         const Signature *, const SigMatchCtx *);
 static int DetectThresholdSetup(DetectEngineCtx *, Signature *, const char *);
-static void DetectThresholdFree(void *);
+static void DetectThresholdFree(DetectEngineCtx *, void *);
+#ifdef UNITTESTS
+static void ThresholdRegisterTests(void);
+#endif
 
 /**
  * \brief Registration function for threshold: keyword
@@ -77,18 +79,20 @@ void DetectThresholdRegister(void)
 {
     sigmatch_table[DETECT_THRESHOLD].name = "threshold";
     sigmatch_table[DETECT_THRESHOLD].desc = "control the rule's alert frequency";
-    sigmatch_table[DETECT_THRESHOLD].url = DOC_URL DOC_VERSION "/rules/thresholding.html#threshold";
+    sigmatch_table[DETECT_THRESHOLD].url = "/rules/thresholding.html#threshold";
     sigmatch_table[DETECT_THRESHOLD].Match = DetectThresholdMatch;
     sigmatch_table[DETECT_THRESHOLD].Setup = DetectThresholdSetup;
     sigmatch_table[DETECT_THRESHOLD].Free  = DetectThresholdFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_THRESHOLD].RegisterTests = ThresholdRegisterTests;
+#endif
     /* this is compatible to ip-only signatures */
     sigmatch_table[DETECT_THRESHOLD].flags |= SIGMATCH_IPONLY_COMPAT;
 
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
-static int DetectThresholdMatch(ThreadVars *thv, DetectEngineThreadCtx *det_ctx, Packet *p,
+static int DetectThresholdMatch(DetectEngineThreadCtx *det_ctx, Packet *p,
         const Signature *s, const SigMatchCtx *ctx)
 {
     return 1;
@@ -106,7 +110,6 @@ static int DetectThresholdMatch(ThreadVars *thv, DetectEngineThreadCtx *det_ctx,
 static DetectThresholdData *DetectThresholdParse(const char *rawstr)
 {
     DetectThresholdData *de = NULL;
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
     const char *str_ptr = NULL;
@@ -143,8 +146,7 @@ static DetectThresholdData *DetectThresholdParse(const char *rawstr)
     if(count_found != 1 || second_found != 1 || type_found != 1 || track_found != 1)
         goto error;
 
-    ret = pcre_exec(parse_regex, parse_regex_study, rawstr, strlen(rawstr), 0, 0, ov, MAX_SUBSTRINGS);
-
+    ret = DetectParsePcreExec(&parse_regex, rawstr, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 5) {
         SCLogError(SC_ERR_PCRE_MATCH, "pcre_exec parse error, ret %" PRId32 ", string %s", ret, rawstr);
         goto error;
@@ -177,6 +179,10 @@ static DetectThresholdData *DetectThresholdParse(const char *rawstr)
             de->track = TRACK_DST;
         if (strncasecmp(args[i],"by_src",strlen("by_src")) == 0)
             de->track = TRACK_SRC;
+        if (strncasecmp(args[i],"by_both",strlen("by_both")) == 0)
+            de->track = TRACK_BOTH;
+        if (strncasecmp(args[i],"by_rule",strlen("by_rule")) == 0)
+            de->track = TRACK_RULE;
         if (strncasecmp(args[i],"count",strlen("count")) == 0)
             count_pos = i+1;
         if (strncasecmp(args[i],"seconds",strlen("seconds")) == 0)
@@ -187,12 +193,12 @@ static DetectThresholdData *DetectThresholdParse(const char *rawstr)
         goto error;
     }
 
-    if (ByteExtractStringUint32(&de->count, 10, strlen(args[count_pos]),
+    if (StringParseUint32(&de->count, 10, strlen(args[count_pos]),
                 args[count_pos]) <= 0) {
         goto error;
     }
 
-    if (ByteExtractStringUint32(&de->seconds, 10, strlen(args[second_pos]),
+    if (StringParseUint32(&de->seconds, 10, strlen(args[second_pos]),
                 args[second_pos]) <= 0) {
         goto error;
     }
@@ -229,16 +235,24 @@ static int DetectThresholdSetup(DetectEngineCtx *de_ctx, Signature *s, const cha
     SigMatch *tmpm = NULL;
 
     /* checks if there is a previous instance of detection_filter */
-    tmpm = DetectGetLastSMFromLists(s, DETECT_DETECTION_FILTER, -1);
+    tmpm = DetectGetLastSMFromLists(s, DETECT_THRESHOLD, DETECT_DETECTION_FILTER, -1);
     if (tmpm != NULL) {
-        SCLogError(SC_ERR_INVALID_SIGNATURE, "\"detection_filter\" and "
-                "\"threshold\" are not allowed in the same rule");
+        if (tmpm->type == DETECT_DETECTION_FILTER) {
+            SCLogError(SC_ERR_INVALID_SIGNATURE, "\"detection_filter\" and "
+                    "\"threshold\" are not allowed in the same rule");
+        } else {
+            SCLogError(SC_ERR_INVALID_SIGNATURE, "multiple \"threshold\" "
+                    "options are not allowed in the same rule");
+        }
         SCReturnInt(-1);
     }
 
     de = DetectThresholdParse(rawstr);
     if (de == NULL)
         goto error;
+
+    if (de->track == TRACK_RULE)
+        ThresholdHashRealloc(de_ctx);
 
     sm = SigMatchAlloc();
     if (sm == NULL)
@@ -263,7 +277,7 @@ error:
  *
  * \param de pointer to DetectThresholdData
  */
-static void DetectThresholdFree(void *de_ptr)
+static void DetectThresholdFree(DetectEngineCtx *de_ctx, void *de_ptr)
 {
     DetectThresholdData *de = (DetectThresholdData *)de_ptr;
     if (de) {
@@ -284,7 +298,7 @@ static void DetectThresholdFree(void *de_ptr)
 /**
  * \test ThresholdTestParse01 is a test for a valid threshold options
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 static int ThresholdTestParse01(void)
@@ -292,7 +306,7 @@ static int ThresholdTestParse01(void)
     DetectThresholdData *de = NULL;
     de = DetectThresholdParse("type limit,track by_dst,count 10,seconds 60");
     if (de && (de->type == TYPE_LIMIT) && (de->track == TRACK_DST) && (de->count == 10) && (de->seconds == 60)) {
-        DetectThresholdFree(de);
+        DetectThresholdFree(NULL, de);
         return 1;
     }
 
@@ -302,7 +316,7 @@ static int ThresholdTestParse01(void)
 /**
  * \test ThresholdTestParse02 is a test for a invalid threshold options
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 static int ThresholdTestParse02(void)
@@ -310,7 +324,7 @@ static int ThresholdTestParse02(void)
     DetectThresholdData *de = NULL;
     de = DetectThresholdParse("type any,track by_dst,count 10,seconds 60");
     if (de && (de->type == TYPE_LIMIT) && (de->track == TRACK_DST) && (de->count == 10) && (de->seconds == 60)) {
-        DetectThresholdFree(de);
+        DetectThresholdFree(NULL, de);
         return 0;
     }
 
@@ -320,7 +334,7 @@ static int ThresholdTestParse02(void)
 /**
  * \test ThresholdTestParse03 is a test for a valid threshold options in any order
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 static int ThresholdTestParse03(void)
@@ -328,7 +342,7 @@ static int ThresholdTestParse03(void)
     DetectThresholdData *de = NULL;
     de = DetectThresholdParse("track by_dst, type limit, seconds 60, count 10");
     if (de && (de->type == TYPE_LIMIT) && (de->track == TRACK_DST) && (de->count == 10) && (de->seconds == 60)) {
-        DetectThresholdFree(de);
+        DetectThresholdFree(NULL, de);
         return 1;
     }
 
@@ -339,7 +353,7 @@ static int ThresholdTestParse03(void)
 /**
  * \test ThresholdTestParse04 is a test for an invalid threshold options in any order
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 static int ThresholdTestParse04(void)
@@ -347,7 +361,7 @@ static int ThresholdTestParse04(void)
     DetectThresholdData *de = NULL;
     de = DetectThresholdParse("count 10, track by_dst, seconds 60, type both, count 10");
     if (de && (de->type == TYPE_BOTH) && (de->track == TRACK_DST) && (de->count == 10) && (de->seconds == 60)) {
-        DetectThresholdFree(de);
+        DetectThresholdFree(NULL, de);
         return 0;
     }
 
@@ -357,7 +371,7 @@ static int ThresholdTestParse04(void)
 /**
  * \test ThresholdTestParse05 is a test for a valid threshold options in any order
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 static int ThresholdTestParse05(void)
@@ -365,20 +379,57 @@ static int ThresholdTestParse05(void)
     DetectThresholdData *de = NULL;
     de = DetectThresholdParse("count 10, track by_dst, seconds 60, type both");
     if (de && (de->type == TYPE_BOTH) && (de->track == TRACK_DST) && (de->count == 10) && (de->seconds == 60)) {
-        DetectThresholdFree(de);
+        DetectThresholdFree(NULL, de);
         return 1;
     }
 
     return 0;
 }
 
+/**
+ * \test ThresholdTestParse06 is a test for thresholding by_both
+ *
+ *  \retval 1 on success
+ *  \retval 0 on failure
+ */
+static int ThresholdTestParse06(void)
+{
+    DetectThresholdData *de = NULL;
+    de = DetectThresholdParse("count 10, track by_both, seconds 60, type limit");
+    FAIL_IF_NULL(de);
+    FAIL_IF_NOT(de->type == TYPE_LIMIT);
+    FAIL_IF_NOT(de->track == TRACK_BOTH);
+    FAIL_IF_NOT(de->count == 10);
+    FAIL_IF_NOT(de->seconds == 60);
+    DetectThresholdFree(NULL, de);
+    PASS;
+}
+
+/**
+ * \test ThresholdTestParse07 is a test for thresholding by_rule
+ *
+ *  \retval 1 on success
+ *  \retval 0 on failure
+ */
+static int ThresholdTestParse07(void)
+{
+    DetectThresholdData *de = NULL;
+    de = DetectThresholdParse("count 10, track by_rule, seconds 60, type limit");
+    FAIL_IF_NULL(de);
+    FAIL_IF_NOT(de->type == TYPE_LIMIT);
+    FAIL_IF_NOT(de->track == TRACK_RULE);
+    FAIL_IF_NOT(de->count == 10);
+    FAIL_IF_NOT(de->seconds == 60);
+    DetectThresholdFree(NULL, de);
+    PASS;
+}
 
 /**
  * \test DetectThresholdTestSig1 is a test for checking the working of limit keyword
  *       by setting up the signature and later testing its working by matching
  *       the received packet against the sig.
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 
@@ -482,7 +533,7 @@ end:
  *       by setting up the signature and later testing its working by matching
  *       the received packet against the sig.
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 
@@ -560,7 +611,7 @@ end:
  *       by setting up the signature and later testing its working by matching
  *       the received packet against the sig.
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 
@@ -665,7 +716,7 @@ end:
  *       by setting up the signature and later testing its working by matching
  *       the received packet against the sig.
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 
@@ -743,7 +794,7 @@ end:
  *       by setting up the signature and later testing its working by matching
  *       the received packet against the sig.
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 
@@ -1473,16 +1524,169 @@ end:
     return result;
 }
 
-#endif /* UNITTESTS */
+/**
+ * \test DetectThresholdTestSig13 is a test for checking the working by_rule limits
+ *       by setting up the signature and later testing its working by matching
+ *       received packets against the sig.
+ *
+ *  \retval 1 on success
+ *  \retval 0 on failure
+ */
 
-void ThresholdRegisterTests(void)
+static int DetectThresholdTestSig13(void)
 {
-#ifdef UNITTESTS
+    Packet *p = NULL;
+    Signature *s = NULL;
+    ThreadVars th_v;
+    DetectEngineThreadCtx *det_ctx;
+    int alerts = 0;
+
+    HostInitConfig(HOST_QUIET);
+
+    memset(&th_v, 0, sizeof(th_v));
+    p = UTHBuildPacketReal((uint8_t *)"A",1,IPPROTO_TCP, "1.1.1.1", "2.2.2.2", 1024, 80);
+    FAIL_IF_NULL(p);
+
+    DetectEngineCtx *de_ctx = DetectEngineCtxInit();
+    FAIL_IF_NULL(de_ctx);
+
+    de_ctx->flags |= DE_QUIET;
+
+    s = de_ctx->sig_list = SigInit(de_ctx,"alert tcp any any -> any 80 (msg:\"Threshold limit sid 1\"; threshold: type limit, track by_rule, count 2, seconds 60; sid:1;)");
+    FAIL_IF_NULL(s);
+
+    SigGroupBuild(de_ctx);
+    DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
+    ThresholdHashRealloc(de_ctx);
+
+    /* should alert twice */
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
+    alerts += PacketAlertCheck(p, 1);
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
+    alerts += PacketAlertCheck(p, 1);
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
+    alerts += PacketAlertCheck(p, 1);
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
+    alerts += PacketAlertCheck(p, 1);
+
+    FAIL_IF(alerts != 2);
+
+    TimeSetIncrementTime(70);
+    TimeGet(&p->ts);
+
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
+    alerts += PacketAlertCheck(p, 1);
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
+    alerts += PacketAlertCheck(p, 1);
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
+    alerts += PacketAlertCheck(p, 1);
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
+    alerts += PacketAlertCheck(p, 1);
+
+    FAIL_IF(alerts != 4);
+
+    SigGroupCleanup(de_ctx);
+    SigCleanSignatures(de_ctx);
+    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
+    UTHFreePackets(&p, 1);
+    HostShutdown();
+    PASS;
+}
+
+/**
+ * \test DetectThresholdTestSig14 is a test for checking the working by_both limits
+ *       by setting up the signature and later testing its working by matching
+ *       received packets against the sig.
+ *
+ *  \retval 1 on success
+ *  \retval 0 on failure
+ */
+
+static int DetectThresholdTestSig14(void)
+{
+    Packet *p1 = NULL;
+    Packet *p2 = NULL;
+    Signature *s = NULL;
+    ThreadVars th_v;
+    DetectEngineThreadCtx *det_ctx;
+    int alerts1 = 0;
+    int alerts2 = 0;
+
+    HostInitConfig(HOST_QUIET);
+    IPPairInitConfig(IPPAIR_QUIET);
+
+    memset(&th_v, 0, sizeof(th_v));
+    p1 = UTHBuildPacketReal((uint8_t *)"A",1,IPPROTO_TCP, "1.1.1.1", "2.2.2.2", 1024, 80);
+    p2 = UTHBuildPacketReal((uint8_t *)"A",1,IPPROTO_TCP, "1.1.1.1", "3.3.3.3", 1024, 80);
+    FAIL_IF_NULL(p1);
+    FAIL_IF_NULL(p2);
+
+    DetectEngineCtx *de_ctx = DetectEngineCtxInit();
+    FAIL_IF_NULL(de_ctx);
+
+    de_ctx->flags |= DE_QUIET;
+
+    s = de_ctx->sig_list = SigInit(de_ctx,"alert tcp any any -> any 80 (msg:\"Threshold limit sid 1\"; threshold: type limit, track by_both, count 2, seconds 60; sid:1;)");
+    FAIL_IF_NULL(s);
+
+    SigGroupBuild(de_ctx);
+    DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
+
+    /* Both p1 and p2 should alert twice */
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p1);
+    alerts1 += PacketAlertCheck(p1, 1);
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p1);
+    alerts1 += PacketAlertCheck(p1, 1);
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p1);
+    alerts1 += PacketAlertCheck(p1, 1);
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p1);
+    alerts1 += PacketAlertCheck(p1, 1);
+
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p2);
+    alerts2 += PacketAlertCheck(p2, 1);
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p2);
+    alerts2 += PacketAlertCheck(p2, 1);
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p2);
+    alerts2 += PacketAlertCheck(p2, 1);
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p2);
+    alerts2 += PacketAlertCheck(p2, 1);
+
+    FAIL_IF(alerts1 != 2);
+    FAIL_IF(alerts2 != 2);
+
+    TimeSetIncrementTime(70);
+    TimeGet(&p1->ts);
+    TimeGet(&p2->ts);
+
+    /* Now they should both alert again after previous alerts expire */
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p1);
+    alerts1 += PacketAlertCheck(p1, 1);
+    SigMatchSignatures(&th_v, de_ctx, det_ctx, p2);
+    alerts2 += PacketAlertCheck(p2, 1);
+
+    FAIL_IF(alerts1 != 3);
+    FAIL_IF(alerts2 != 3);
+
+    SigGroupCleanup(de_ctx);
+    SigCleanSignatures(de_ctx);
+    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
+    UTHFreePackets(&p1, 1);
+    UTHFreePackets(&p2, 1);
+    HostShutdown();
+    PASS;
+}
+
+static void ThresholdRegisterTests(void)
+{
     UtRegisterTest("ThresholdTestParse01", ThresholdTestParse01);
     UtRegisterTest("ThresholdTestParse02", ThresholdTestParse02);
     UtRegisterTest("ThresholdTestParse03", ThresholdTestParse03);
     UtRegisterTest("ThresholdTestParse04", ThresholdTestParse04);
     UtRegisterTest("ThresholdTestParse05", ThresholdTestParse05);
+    UtRegisterTest("ThresholdTestParse06", ThresholdTestParse06);
+    UtRegisterTest("ThresholdTestParse07", ThresholdTestParse07);
     UtRegisterTest("DetectThresholdTestSig1", DetectThresholdTestSig1);
     UtRegisterTest("DetectThresholdTestSig2", DetectThresholdTestSig2);
     UtRegisterTest("DetectThresholdTestSig3", DetectThresholdTestSig3);
@@ -1496,8 +1700,10 @@ void ThresholdRegisterTests(void)
     UtRegisterTest("DetectThresholdTestSig10", DetectThresholdTestSig10);
     UtRegisterTest("DetectThresholdTestSig11", DetectThresholdTestSig11);
     UtRegisterTest("DetectThresholdTestSig12", DetectThresholdTestSig12);
-#endif /* UNITTESTS */
+    UtRegisterTest("DetectThresholdTestSig13", DetectThresholdTestSig13);
+    UtRegisterTest("DetectThresholdTestSig14", DetectThresholdTestSig14);
 }
+#endif /* UNITTESTS */
 
 /**
  * @}

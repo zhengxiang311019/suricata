@@ -43,13 +43,24 @@
 #endif /* HAVE_PACKET_FANOUT */
 #include "queue.h"
 
+#ifdef HAVE_PACKET_EBPF
+#define AFP_MODE_XDP_BYPASS 1
+#define AFP_MODE_EBPF_BYPASS 2
+struct ebpf_timeout_config {
+    const char *pinned_maps_name;
+    uint16_t cpus_count;
+    uint8_t mode;
+    uint8_t flags;
+};
+#endif
+
 /* value for flags */
 #define AFP_RING_MODE (1<<0)
 #define AFP_ZERO_COPY (1<<1)
 #define AFP_SOCK_PROTECT (1<<2)
 #define AFP_EMERGENCY_MODE (1<<3)
 #define AFP_TPACKET_V3 (1<<4)
-#define AFP_VLAN_DISABLED (1<<5)
+#define AFP_VLAN_IN_HEADER (1<<5)
 #define AFP_MMAP_LOCKED (1<<6)
 #define AFP_BYPASS   (1<<7)
 #define AFP_XDPBYPASS   (1<<8)
@@ -81,7 +92,7 @@ typedef struct AFPIfaceConfig_
     /* block timeout for tpacket_v3 in milliseconds */
     int block_timeout;
     /* cluster param */
-    int cluster_id;
+    uint16_t cluster_id;
     int cluster_type;
     /* promisc mode */
     int promisc;
@@ -98,6 +109,9 @@ typedef struct AFPIfaceConfig_
     int xdp_filter_fd;
     uint8_t xdp_mode;
     const char *out_iface;
+#ifdef HAVE_PACKET_EBPF
+    struct ebpf_timeout_config ebpf_t_config;
+#endif
     SC_ATOMIC_DECLARE(unsigned int, ref);
     void (*DerefFunc)(void *);
 } AFPIfaceConfig;
@@ -135,10 +149,14 @@ typedef struct AFPPacketVars_
      */
     AFPPeer *mpeer;
     uint8_t copy_mode;
+#ifdef HAVE_PACKET_EBPF
     int v4_map_fd;
     int v6_map_fd;
+    unsigned int nr_cpus;
+#endif
 } AFPPacketVars;
 
+#ifdef HAVE_PACKET_EBPF
 #define AFPV_CLEANUP(afpv) do {           \
     (afpv)->relptr = NULL;                \
     (afpv)->copy_mode = 0;                \
@@ -147,6 +165,14 @@ typedef struct AFPPacketVars_
     (afpv)->v4_map_fd = -1;               \
     (afpv)->v6_map_fd = -1;               \
 } while(0)
+#else
+#define AFPV_CLEANUP(afpv) do {           \
+    (afpv)->relptr = NULL;                \
+    (afpv)->copy_mode = 0;                \
+    (afpv)->peer = NULL;                  \
+    (afpv)->mpeer = NULL;                 \
+} while(0)
+#endif
 
 /**
  * @}
@@ -160,6 +186,7 @@ TmEcode AFPPeersListCheck(void);
 void AFPPeersListClean(void);
 int AFPGetLinkType(const char *ifname);
 
-int AFPIsFanoutSupported(void);
+int AFPIsFanoutSupported(int cluster_id);
+
 
 #endif /* __SOURCE_AFP_H__ */

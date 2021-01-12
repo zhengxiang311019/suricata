@@ -38,6 +38,8 @@
 #include "output-streaming.h"
 #include "output-stats.h"
 
+#include "util-config.h"
+
 typedef struct OutputInitResult_ {
     OutputCtx *ctx;
     bool ok;
@@ -46,6 +48,7 @@ typedef struct OutputInitResult_ {
 typedef OutputInitResult (*OutputInitFunc)(ConfNode *);
 typedef OutputInitResult (*OutputInitSubFunc)(ConfNode *, OutputCtx *);
 typedef TmEcode (*OutputLogFunc)(ThreadVars *, Packet *, void *);
+typedef uint32_t (*OutputGetActiveCountFunc)(void);
 
 typedef struct OutputModule_ {
     LoggerId logger_id;
@@ -148,11 +151,6 @@ void OutputRegisterFiledataSubModule(LoggerId, const char *parent_name,
     ThreadDeinitFunc ThreadDeinit,
     ThreadExitPrintStatsFunc ThreadExitPrintStats);
 
-void OutputRegisterFlowModule(LoggerId id, const char *name,
-    const char *conf_name, OutputInitFunc InitFunc,
-    FlowLogger FlowLogFunc, ThreadInitFunc ThreadInit,
-    ThreadDeinitFunc ThreadDeinit,
-    ThreadExitPrintStatsFunc ThreadExitPrintStats);
 void OutputRegisterFlowSubModule(LoggerId id, const char *parent_name,
     const char *name, const char *conf_name, OutputInitSubFunc InitFunc,
     FlowLogger FlowLogFunc, ThreadInitFunc ThreadInit,
@@ -196,12 +194,15 @@ void OutputNotifyFileRotation(void);
 void OutputRegisterRootLogger(ThreadInitFunc ThreadInit,
     ThreadDeinitFunc ThreadDeinit,
     ThreadExitPrintStatsFunc ThreadExitPrintStats,
-    OutputLogFunc LogFunc);
+    OutputLogFunc LogFunc, OutputGetActiveCountFunc ActiveCntFunc);
 void TmModuleLoggerRegister(void);
 
 TmEcode OutputLoggerLog(ThreadVars *, Packet *, void *);
 TmEcode OutputLoggerThreadInit(ThreadVars *, const void *, void **);
 TmEcode OutputLoggerThreadDeinit(ThreadVars *, void *);
 void OutputLoggerExitPrintStats(ThreadVars *, void *);
+
+void OutputSetupActiveLoggers(void);
+void OutputClearActiveLoggers(void);
 
 #endif /* ! __OUTPUT_H__ */

@@ -41,7 +41,7 @@
  * @param input
  * @param offset
  */
-static int ENIPExtractUint8(uint8_t *res, uint8_t *input, uint16_t *offset, uint32_t input_len)
+static int ENIPExtractUint8(uint8_t *res, const uint8_t *input, uint16_t *offset, uint32_t input_len)
 {
 
     if (input_len < sizeof(uint8_t) || *offset > (input_len - sizeof(uint8_t)))
@@ -61,7 +61,7 @@ static int ENIPExtractUint8(uint8_t *res, uint8_t *input, uint16_t *offset, uint
  * @param input
  * @param offset
  */
-static int ENIPExtractUint16(uint16_t *res, uint8_t *input, uint16_t *offset, uint32_t input_len)
+static int ENIPExtractUint16(uint16_t *res, const uint8_t *input, uint16_t *offset, uint32_t input_len)
 {
 
     if (input_len < sizeof(uint16_t) || *offset > (input_len - sizeof(uint16_t)))
@@ -82,7 +82,7 @@ static int ENIPExtractUint16(uint16_t *res, uint8_t *input, uint16_t *offset, ui
  * @param input
  * @param offset
  */
-static int ENIPExtractUint32(uint32_t *res, uint8_t *input, uint16_t *offset, uint32_t input_len)
+static int ENIPExtractUint32(uint32_t *res, const uint8_t *input, uint16_t *offset, uint32_t input_len)
 {
 
     if (input_len < sizeof(uint32_t) || *offset > (input_len - sizeof(uint32_t)))
@@ -103,7 +103,7 @@ static int ENIPExtractUint32(uint32_t *res, uint8_t *input, uint16_t *offset, ui
  * @param input
  * @param offset
  */
-static int ENIPExtractUint64(uint64_t *res, uint8_t *input, uint16_t *offset, uint32_t input_len)
+static int ENIPExtractUint64(uint64_t *res, const uint8_t *input, uint16_t *offset, uint32_t input_len)
 {
 
     if (input_len < sizeof(uint64_t) || *offset > (input_len - sizeof(uint64_t)))
@@ -182,7 +182,7 @@ static void CIPServiceFree(void *s)
  * @return 1 Packet ok
  * @return 0 Packet has errors
  */
-int DecodeENIPPDU(uint8_t *input, uint32_t input_len,
+int DecodeENIPPDU(const uint8_t *input, uint32_t input_len,
         ENIPTransaction *enip_data)
 {
     int ret = 1;
@@ -283,7 +283,7 @@ int DecodeENIPPDU(uint8_t *input, uint32_t input_len,
  * @return 1 Packet ok
  * @return 0 Packet has errors
  */
-int DecodeCommonPacketFormatPDU(uint8_t *input, uint32_t input_len,
+int DecodeCommonPacketFormatPDU(const uint8_t *input, uint32_t input_len,
         ENIPTransaction *enip_data, uint16_t offset)
 {
 
@@ -404,7 +404,7 @@ int DecodeCommonPacketFormatPDU(uint8_t *input, uint32_t input_len,
  * @return 0 Packet has errors
  */
 
-int DecodeCIPPDU(uint8_t *input, uint32_t input_len,
+int DecodeCIPPDU(const uint8_t *input, uint32_t input_len,
         ENIPTransaction *enip_data, uint16_t offset)
 {
     int ret = 1;
@@ -448,7 +448,7 @@ int DecodeCIPPDU(uint8_t *input, uint32_t input_len,
  * @return 1 Packet ok
  * @return 0 Packet has errors
  */
-int DecodeCIPRequestPDU(uint8_t *input, uint32_t input_len,
+int DecodeCIPRequestPDU(const uint8_t *input, uint32_t input_len,
         ENIPTransaction *enip_data, uint16_t offset)
 {
     int ret = 1;
@@ -459,8 +459,8 @@ int DecodeCIPRequestPDU(uint8_t *input, uint32_t input_len,
         return 0;
     }
 
-    uint8_t service; //<-----CIP SERVICE
-    uint8_t path_size;
+    uint8_t service = 0; //<-----CIP SERVICE
+    uint8_t path_size = 0;
 
     if (ENIPExtractUint8(&service, input, &offset, input_len) != 1)
     {
@@ -489,7 +489,7 @@ int DecodeCIPRequestPDU(uint8_t *input, uint32_t input_len,
     if (node == NULL)
     {
         SCLogDebug("DecodeCIPRequest: Unable to create CIP service");
-	return 0;
+        return 0;
     }
     node->direction = 0;
     node->service = service;
@@ -568,7 +568,7 @@ int DecodeCIPRequestPDU(uint8_t *input, uint32_t input_len,
  * @return 1 Packet matches
  * @return 0 Packet not match
  */
-int DecodeCIPRequestPathPDU(uint8_t *input, uint32_t input_len,
+int DecodeCIPRequestPathPDU(const uint8_t *input, uint32_t input_len,
         CIPServiceEntry *node, uint16_t offset)
 {
     //SCLogDebug("DecodeCIPRequestPath: service 0x%x size %d length %d",
@@ -582,11 +582,9 @@ int DecodeCIPRequestPathPDU(uint8_t *input, uint32_t input_len,
 
     int bytes_remain = node->request.path_size;
 
-    uint8_t segment;
     uint8_t reserved; //unused byte reserved by ODVA
 
     //8 bit fields
-    uint8_t req_path_class8;
     uint8_t req_path_instance8;
     uint8_t req_path_attr8;
 
@@ -600,15 +598,16 @@ int DecodeCIPRequestPathPDU(uint8_t *input, uint32_t input_len,
 
     while (bytes_remain > 0)
     {
+        uint8_t segment = 0;
         if (ENIPExtractUint8(&segment, input, &offset, input_len) != 1)
         {
             return 0;
         }
         switch (segment)
         { //assume order is class then instance.  Can have multiple
-            case PATH_CLASS_8BIT:
-                if (ENIPExtractUint8(&req_path_class8, input, &offset, input_len) != 1)
-                {
+            case PATH_CLASS_8BIT: {
+                uint8_t req_path_class8 = 0;
+                if (ENIPExtractUint8(&req_path_class8, input, &offset, input_len) != 1) {
                     return 0;
                 }
                 class = (uint16_t) req_path_class8;
@@ -623,6 +622,7 @@ int DecodeCIPRequestPathPDU(uint8_t *input, uint32_t input_len,
 
                 bytes_remain--;
                 break;
+            }
             case PATH_INSTANCE_8BIT:
                 if (ENIPExtractUint8(&req_path_instance8, input, &offset, input_len) != 1)
                 {
@@ -741,7 +741,7 @@ int DecodeCIPRequestPathPDU(uint8_t *input, uint32_t input_len,
  * @return 1 Packet ok
  * @return 0 Packet has errors
  */
-int DecodeCIPResponsePDU(uint8_t *input, uint32_t input_len,
+int DecodeCIPResponsePDU(const uint8_t *input, uint32_t input_len,
         ENIPTransaction *enip_data, uint16_t offset)
 {
     int ret = 1;
@@ -752,7 +752,7 @@ int DecodeCIPResponsePDU(uint8_t *input, uint32_t input_len,
         return 0;
     }
 
-    uint8_t service; //<----CIP SERVICE
+    uint8_t service = 0; //<----CIP SERVICE
     uint8_t reserved; //unused byte reserved by ODVA
     uint16_t status;
 
@@ -860,7 +860,7 @@ int DecodeCIPResponsePDU(uint8_t *input, uint32_t input_len,
  * @return 1 Packet ok
  * @return 0 Packet has errors
  */
-int DecodeCIPRequestMSPPDU(uint8_t *input, uint32_t input_len,
+int DecodeCIPRequestMSPPDU(const uint8_t *input, uint32_t input_len,
         ENIPTransaction *enip_data, uint16_t offset)
 {
     int ret = 1;
@@ -907,7 +907,7 @@ int DecodeCIPRequestMSPPDU(uint8_t *input, uint32_t input_len,
  * @return 1 Packet ok
  * @return 0 Packet has errors
  */
-int DecodeCIPResponseMSPPDU(uint8_t *input, uint32_t input_len,
+int DecodeCIPResponseMSPPDU(const uint8_t *input, uint32_t input_len,
         ENIPTransaction *enip_data, uint16_t offset)
 {
     int ret = 1;

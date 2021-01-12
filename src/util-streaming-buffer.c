@@ -68,9 +68,9 @@ int SBBCompare(struct StreamingBufferBlock *a, struct StreamingBufferBlock *b)
 static inline int InclusiveCompare(StreamingBufferBlock *lookup, StreamingBufferBlock *intree) {
     const uint64_t lre = lookup->offset + lookup->len;
     const uint64_t tre = intree->offset + intree->len;
-    if (lre < intree->offset)   // entirely before
+    if (lre <= intree->offset)   // entirely before
         return -1;
-    else if (lre >= intree->offset && lre <= tre)    // (some) overlap
+    else if (lre >= intree->offset && lookup->offset < tre && lre <= tre)   // (some) overlap
         return 0;
     else
         return 1;   // entirely after
@@ -442,7 +442,7 @@ static void AutoSlide(StreamingBuffer *sb)
     SBBPrune(sb);
 }
 
-static int __attribute__((warn_unused_result))
+static int WARN_UNUSED
 GrowToSize(StreamingBuffer *sb, uint32_t size)
 {
     /* try to grow in multiples of sb->cfg->buf_size */
@@ -476,7 +476,7 @@ GrowToSize(StreamingBuffer *sb, uint32_t size)
  *  \retval 0 ok
  *  \retval -1 failed, buffer unchanged
  */
-static int __attribute__((warn_unused_result)) Grow(StreamingBuffer *sb)
+static int WARN_UNUSED Grow(StreamingBuffer *sb)
 {
     uint32_t grow = sb->buf_size * 2;
     void *ptr = REALLOC(sb->cfg, sb->buf, sb->buf_size, grow);
@@ -747,8 +747,8 @@ void StreamingBufferSBBGetData(const StreamingBuffer *sb,
     if (sbb->offset >= sb->stream_offset) {
         uint64_t offset = sbb->offset - sb->stream_offset;
         *data = sb->buf + offset;
-        if (offset + sbb->len > sb->buf_size)
-            *data_len = sb->buf_size - offset;
+        if (offset + sbb->len > sb->buf_offset)
+            *data_len = sb->buf_offset - offset;
         else
             *data_len = sbb->len;
         return;

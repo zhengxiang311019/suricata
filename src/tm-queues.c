@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2019 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -28,63 +28,69 @@
 #include "tm-queues.h"
 #include "util-debug.h"
 
-#define TMQ_MAX_QUEUES 256
+static TAILQ_HEAD(TmqList_, Tmq_) tmq_list = TAILQ_HEAD_INITIALIZER(tmq_list);
 
 static uint16_t tmq_id = 0;
-static Tmq tmqs[TMQ_MAX_QUEUES];
 
 Tmq *TmqCreateQueue(const char *name)
 {
-    if (tmq_id >= TMQ_MAX_QUEUES)
-        goto error;
+    Tmq *q = SCCalloc(1, sizeof(*q));
+    if (q == NULL)
+        FatalError(SC_ERR_MEM_ALLOC, "SCCalloc failed");
 
-    Tmq *q = &tmqs[tmq_id];
     q->name = SCStrdup(name);
     if (q->name == NULL)
-        goto error;
+        FatalError(SC_ERR_MEM_ALLOC, "SCStrdup failed");
 
     q->id = tmq_id++;
+    q->is_packet_pool = (strcmp(q->name, "packetpool") == 0);
+    if (!q->is_packet_pool) {
+        q->pq = PacketQueueAlloc();
+        if (q->pq == NULL)
+            FatalError(SC_ERR_MEM_ALLOC, "PacketQueueAlloc failed");
+    }
+
+    TAILQ_INSERT_HEAD(&tmq_list, q, next);
 
     SCLogDebug("created queue \'%s\', %p", name, q);
     return q;
-
-error:
-    SCLogError(SC_ERR_THREAD_QUEUE, "too many thread queues %u, max is %u", tmq_id+1, TMQ_MAX_QUEUES);
-    return NULL;
 }
 
-Tmq* TmqGetQueueByName(const char *name)
+Tmq *TmqGetQueueByName(const char *name)
 {
-    uint16_t i;
-
-    for (i = 0; i < tmq_id; i++) {
-        if (strcmp(tmqs[i].name, name) == 0)
-            return &tmqs[i];
+    Tmq *tmq = NULL;
+    TAILQ_FOREACH(tmq, &tmq_list, next) {
+        if (strcmp(tmq->name, name) == 0)
+            return tmq;
     }
-
     return NULL;
 }
 
 void TmqDebugList(void)
 {
-    uint16_t i = 0;
-    for (i = 0; i < tmq_id; i++) {
+    Tmq *tmq = NULL;
+    TAILQ_FOREACH(tmq, &tmq_list, next) {
         /* get a lock accessing the len */
-        SCMutexLock(&trans_q[tmqs[i].id].mutex_q);
-        printf("TmqDebugList: id %" PRIu32 ", name \'%s\', len %" PRIu32 "\n", tmqs[i].id, tmqs[i].name, trans_q[tmqs[i].id].len);
-        SCMutexUnlock(&trans_q[tmqs[i].id].mutex_q);
+        SCMutexLock(&tmq->pq->mutex_q);
+        printf("TmqDebugList: id %" PRIu32 ", name \'%s\', len %" PRIu32 "\n", tmq->id, tmq->name, tmq->pq->len);
+        SCMutexUnlock(&tmq->pq->mutex_q);
     }
 }
 
 void TmqResetQueues(void)
 {
-    uint16_t i;
-    for (i = 0; i < TMQ_MAX_QUEUES; i++) {
-        if (tmqs[i].name) {
-            SCFree(tmqs[i].name);
+    Tmq *tmq;
+
+    while ((tmq = TAILQ_FIRST(&tmq_list))) {
+        TAILQ_REMOVE(&tmq_list, tmq, next);
+        if (tmq->name) {
+            SCFree(tmq->name);
         }
+        if (tmq->pq) {
+            PacketQueueFree(tmq->pq);
+        }
+        SCFree(tmq);
     }
-    memset(&tmqs, 0x00, sizeof(tmqs));
     tmq_id = 0;
 }
 
@@ -94,27 +100,28 @@ void TmqResetQueues(void)
  */
 void TmValidateQueueState(void)
 {
-    int i = 0;
-    char err = FALSE;
+    bool err = false;
 
-    for (i = 0; i < tmq_id; i++) {
-        SCMutexLock(&trans_q[tmqs[i].id].mutex_q);
-        if (tmqs[i].reader_cnt == 0) {
-            SCLogError(SC_ERR_THREAD_QUEUE, "queue \"%s\" doesn't have a reader (id %d, max %u)", tmqs[i].name, i, tmq_id);
-            err = TRUE;
-        } else if (tmqs[i].writer_cnt == 0) {
-            SCLogError(SC_ERR_THREAD_QUEUE, "queue \"%s\" doesn't have a writer (id %d, max %u)", tmqs[i].name, i, tmq_id);
-            err = TRUE;
+    Tmq *tmq = NULL;
+    TAILQ_FOREACH(tmq, &tmq_list, next) {
+        SCMutexLock(&tmq->pq->mutex_q);
+        if (tmq->reader_cnt == 0) {
+            SCLogError(SC_ERR_THREAD_QUEUE, "queue \"%s\" doesn't have a reader (id %d max %u)",
+                    tmq->name, tmq->id, tmq_id);
+            err = true;
+        } else if (tmq->writer_cnt == 0) {
+            SCLogError(SC_ERR_THREAD_QUEUE, "queue \"%s\" doesn't have a writer (id %d, max %u)",
+                    tmq->name, tmq->id, tmq_id);
+            err = true;
         }
-        SCMutexUnlock(&trans_q[tmqs[i].id].mutex_q);
+        SCMutexUnlock(&tmq->pq->mutex_q);
 
-        if (err == TRUE)
+        if (err == true)
             goto error;
     }
 
     return;
 
 error:
-    SCLogError(SC_ERR_FATAL, "fatal error during threading setup");
-    exit(EXIT_FAILURE);
+    FatalError(SC_ERR_FATAL, "fatal error during threading setup");
 }

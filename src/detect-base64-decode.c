@@ -1,4 +1,4 @@
-/* Copyright (C) 2015 Open Information Security Foundation
+/* Copyright (C) 2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -29,12 +29,14 @@
 static const char decode_pattern[] = "\\s*(bytes\\s+(\\d+),?)?"
     "\\s*(offset\\s+(\\d+),?)?"
     "\\s*(\\w+)?";
-static pcre *decode_pcre = NULL;
-static pcre_extra *decode_pcre_study = NULL;
+
+static DetectParseRegex decode_pcre;
 
 static int DetectBase64DecodeSetup(DetectEngineCtx *, Signature *, const char *);
-static void DetectBase64DecodeFree(void *);
+static void DetectBase64DecodeFree(DetectEngineCtx *, void *);
+#ifdef UNITTESTS
 static void DetectBase64DecodeRegisterTests(void);
+#endif
 
 void DetectBase64DecodeRegister(void)
 {
@@ -42,19 +44,20 @@ void DetectBase64DecodeRegister(void)
     sigmatch_table[DETECT_BASE64_DECODE].desc =
         "Decodes base64 encoded data.";
     sigmatch_table[DETECT_BASE64_DECODE].url =
-        DOC_URL DOC_VERSION "/rules/payload-keywords.html#base64-decode";
+        "/rules/base64-keywords.html#base64-decode";
     sigmatch_table[DETECT_BASE64_DECODE].Setup = DetectBase64DecodeSetup;
     sigmatch_table[DETECT_BASE64_DECODE].Free = DetectBase64DecodeFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_BASE64_DECODE].RegisterTests =
         DetectBase64DecodeRegisterTests;
-
+#endif
     sigmatch_table[DETECT_BASE64_DECODE].flags |= SIGMATCH_OPTIONAL_OPT;
 
-    DetectSetupParseRegexes(decode_pattern, &decode_pcre, &decode_pcre_study);
+    DetectSetupParseRegexes(decode_pattern, &decode_pcre);
 }
 
 int DetectBase64DecodeDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s,
-    const SigMatchData *smd, uint8_t *payload, uint32_t payload_len)
+    const SigMatchData *smd, const uint8_t *payload, uint32_t payload_len)
 {
     DetectBase64Decode *data = (DetectBase64Decode *)smd->ctx;
     int decode_len;
@@ -114,15 +117,14 @@ static int DetectBase64DecodeParse(const char *str, uint32_t *bytes,
     *offset = 0;
     *relative = 0;
 
-    pcre_rc = pcre_exec(decode_pcre, decode_pcre_study, str, strlen(str), 0, 0,
-        ov, max);
+    pcre_rc = DetectParsePcreExec(&decode_pcre, str,  0, 0, ov, max);
     if (pcre_rc < 3) {
         goto error;
     }
 
     if (pcre_rc >= 3) {
         if (pcre_get_substring((char *)str, ov, max, 2, &bytes_str) > 0) {
-            if (ByteExtractStringUint32(bytes, 10, 0, bytes_str) <= 0) {
+            if (StringParseUint32(bytes, 10, 0, bytes_str) <= 0) {
                 SCLogError(SC_ERR_INVALID_RULE_ARGUMENT,
                     "Bad value for bytes: \"%s\"", bytes_str);
                 goto error;
@@ -132,7 +134,7 @@ static int DetectBase64DecodeParse(const char *str, uint32_t *bytes,
 
     if (pcre_rc >= 5) {
         if (pcre_get_substring((char *)str, ov, max, 4, &offset_str)) {
-            if (ByteExtractStringUint32(offset, 10, 0, offset_str) <= 0) {
+            if (StringParseUint32(offset, 10, 0, offset_str) <= 0) {
                 SCLogError(SC_ERR_INVALID_RULE_ARGUMENT,
                     "Bad value for offset: \"%s\"", offset_str);
                 goto error;
@@ -240,7 +242,7 @@ error:
     return -1;
 }
 
-static void DetectBase64DecodeFree(void *ptr)
+static void DetectBase64DecodeFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectBase64Decode *data = ptr;
     SCFree(data);
@@ -658,11 +660,8 @@ end:
     return retval;
 }
 
-#endif
-
 static void DetectBase64DecodeRegisterTests(void)
 {
-#ifdef UNITTESTS
     g_http_header_buffer_id = DetectBufferTypeGetByName("http_header");
 
     UtRegisterTest("DetectBase64TestDecodeParse", DetectBase64TestDecodeParse);
@@ -677,5 +676,5 @@ static void DetectBase64DecodeRegisterTests(void)
                    DetectBase64DecodeTestDecodeLargeOffset);
     UtRegisterTest("DetectBase64DecodeTestDecodeRelative",
                    DetectBase64DecodeTestDecodeRelative);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

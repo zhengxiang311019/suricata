@@ -1,4 +1,4 @@
-/* Copyright (C) 2011 Open Information Security Foundation
+/* Copyright (C) 2011-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -39,13 +39,15 @@
 
 #define PARSE_REGEX "([0x]*[0-9a-f]+)/([0x]*[0-9a-f]+)"
 
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
 static int DetectMarkSetup (DetectEngineCtx *, Signature *, const char *);
-static int DetectMarkPacket(ThreadVars *t, DetectEngineThreadCtx *det_ctx, Packet *p,
+static int DetectMarkPacket(DetectEngineThreadCtx *det_ctx, Packet *p,
         const Signature *s, const SigMatchCtx *ctx);
-void DetectMarkDataFree(void *ptr);
+void DetectMarkDataFree(DetectEngineCtx *, void *ptr);
+#if defined UNITTESTS && defined NFQ
+static void MarkRegisterTests(void);
+#endif
 
 /**
  * \brief Registration function for nfq_set_mark: keyword
@@ -57,9 +59,10 @@ void DetectMarkRegister (void)
     sigmatch_table[DETECT_MARK].Match = DetectMarkPacket;
     sigmatch_table[DETECT_MARK].Setup = DetectMarkSetup;
     sigmatch_table[DETECT_MARK].Free  = DetectMarkDataFree;
+#if defined UNITTESTS && defined NFQ
     sigmatch_table[DETECT_MARK].RegisterTests = MarkRegisterTests;
-
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+#endif
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 #ifdef NFQ
@@ -75,7 +78,6 @@ void DetectMarkRegister (void)
 static void * DetectMarkParse (const char *rawstr)
 {
     int ret = 0, res = 0;
-#define MAX_SUBSTRINGS 30
     int ov[MAX_SUBSTRINGS];
     const char *str_ptr = NULL;
     char *ptr = NULL;
@@ -84,7 +86,7 @@ static void * DetectMarkParse (const char *rawstr)
     uint32_t mask;
     DetectMarkData *data;
 
-    ret = pcre_exec(parse_regex, parse_regex_study, rawstr, strlen(rawstr), 0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, rawstr, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret < 1) {
         SCLogError(SC_ERR_PCRE_MATCH, "pcre_exec parse error, ret %" PRId32 ", string %s", ret, rawstr);
         return NULL;
@@ -184,41 +186,37 @@ static void * DetectMarkParse (const char *rawstr)
  */
 static int DetectMarkSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawstr)
 {
-#ifdef NFQ
-    DetectMarkData *data = NULL;
-    SigMatch *sm = NULL;
-
-    data = DetectMarkParse(rawstr);
-
+#ifndef NFQ
+    return 0;
+#else
+    DetectMarkData *data = DetectMarkParse(rawstr);
     if (data == NULL) {
         return -1;
-    } else {
-        sm = SigMatchAlloc();
-        if (sm == NULL) {
-            DetectMarkDataFree(data);
-            return -1;
-        }
-
-        sm->type = DETECT_MARK;
-        sm->ctx = (SigMatchCtx *)data;
-
-        /* Append it to the list of tags */
-        SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_TMATCH);
-        return 0;
     }
-#else
+    SigMatch *sm = SigMatchAlloc();
+    if (sm == NULL) {
+        DetectMarkDataFree(de_ctx, data);
+        return -1;
+    }
+
+    sm->type = DETECT_MARK;
+    sm->ctx = (SigMatchCtx *)data;
+
+    /* Append it to the list of post match, so the mark is set if the
+     * full signature matches. */
+    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_POSTMATCH);
     return 0;
 #endif
 }
 
-void DetectMarkDataFree(void *ptr)
+void DetectMarkDataFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectMarkData *data = (DetectMarkData *)ptr;
     SCFree(data);
 }
 
 
-static int DetectMarkPacket(ThreadVars *t, DetectEngineThreadCtx *det_ctx, Packet *p,
+static int DetectMarkPacket(DetectEngineThreadCtx *det_ctx, Packet *p,
         const Signature *s, const SigMatchCtx *ctx)
 {
 #ifdef NFQ
@@ -255,8 +253,6 @@ static int DetectMarkPacket(ThreadVars *t, DetectEngineThreadCtx *det_ctx, Packe
 /**
  * \test MarkTestParse01 is a test for a valid mark value
  *
- *  \retval 1 on succces
- *  \retval 0 on failure
  */
 static int MarkTestParse01 (void)
 {
@@ -264,19 +260,15 @@ static int MarkTestParse01 (void)
 
     data = DetectMarkParse("1/1");
 
-    if (data == NULL) {
-        return 0;
-    }
+    FAIL_IF_NULL(data);
 
-    DetectMarkDataFree(data);
-    return 1;
+    DetectMarkDataFree(NULL, data);
+    PASS;
 }
 
 /**
  * \test MarkTestParse02 is a test for an invalid mark value
  *
- *  \retval 1 on succces
- *  \retval 0 on failure
  */
 static int MarkTestParse02 (void)
 {
@@ -284,19 +276,15 @@ static int MarkTestParse02 (void)
 
     data = DetectMarkParse("4");
 
-    if (data == NULL) {
-        return 1;
-    }
+    PASS_IF(data == NULL);
 
-    DetectMarkDataFree(data);
-    return 0;
+    DetectMarkDataFree(NULL, data);
+    FAIL;
 }
 
 /**
  * \test MarkTestParse03 is a test for a valid mark value
  *
- *  \retval 1 on succces
- *  \retval 0 on failure
  */
 static int MarkTestParse03 (void)
 {
@@ -304,19 +292,15 @@ static int MarkTestParse03 (void)
 
     data = DetectMarkParse("0x10/0xff");
 
-    if (data == NULL) {
-        return 0;
-    }
+    FAIL_IF_NULL(data);
 
-    DetectMarkDataFree(data);
-    return 1;
+    DetectMarkDataFree(NULL, data);
+    PASS;
 }
 
 /**
  * \test MarkTestParse04 is a test for a invalid mark value
  *
- *  \retval 1 on succces
- *  \retval 0 on failure
  */
 static int MarkTestParse04 (void)
 {
@@ -324,27 +308,20 @@ static int MarkTestParse04 (void)
 
     data = DetectMarkParse("0x1g/0xff");
 
-    if (data == NULL) {
-        return 1;
-    }
+    PASS_IF(data == NULL);
 
-    DetectMarkDataFree(data);
-    return 0;
+    DetectMarkDataFree(NULL, data);
+    FAIL;
 }
-
-
-
-#endif /* UNITTESTS */
 
 /**
  * \brief this function registers unit tests for Mark
  */
-void MarkRegisterTests(void)
+static void MarkRegisterTests(void)
 {
-#if defined UNITTESTS && defined NFQ
     UtRegisterTest("MarkTestParse01", MarkTestParse01);
     UtRegisterTest("MarkTestParse02", MarkTestParse02);
     UtRegisterTest("MarkTestParse03", MarkTestParse03);
     UtRegisterTest("MarkTestParse04", MarkTestParse04);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

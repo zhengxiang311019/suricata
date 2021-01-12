@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2011 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -38,6 +38,7 @@
 #include "app-layer-htp-mem.h"
 #include "detect-engine-state.h"
 #include "util-streaming-buffer.h"
+#include "rust.h"
 
 #include <htp/htp.h>
 
@@ -50,6 +51,11 @@
 #define HTP_CONFIG_DEFAULT_RESPONSE_INSPECT_WINDOW      4096U
 #define HTP_CONFIG_DEFAULT_FIELD_LIMIT_SOFT             9000U
 #define HTP_CONFIG_DEFAULT_FIELD_LIMIT_HARD             18000U
+
+#define HTP_CONFIG_DEFAULT_LZMA_LAYERS 0U
+/* default libhtp lzma limit, taken from libhtp. */
+#define HTP_CONFIG_DEFAULT_LZMA_MEMLIMIT                1048576U
+#define HTP_CONFIG_DEFAULT_COMPRESSION_BOMB_LIMIT       1048576U
 
 #define HTP_CONFIG_DEFAULT_RANDOMIZE                    1
 #define HTP_CONFIG_DEFAULT_RANDOMIZE_RANGE              10
@@ -86,6 +92,8 @@ enum {
     HTTP_DECODER_EVENT_INVALID_TRANSFER_ENCODING_VALUE_IN_RESPONSE,
     HTTP_DECODER_EVENT_INVALID_CONTENT_LENGTH_FIELD_IN_REQUEST,
     HTTP_DECODER_EVENT_INVALID_CONTENT_LENGTH_FIELD_IN_RESPONSE,
+    HTTP_DECODER_EVENT_DUPLICATE_CONTENT_LENGTH_FIELD_IN_REQUEST,
+    HTTP_DECODER_EVENT_DUPLICATE_CONTENT_LENGTH_FIELD_IN_RESPONSE,
     HTTP_DECODER_EVENT_100_CONTINUE_ALREADY_SEEN,
     HTTP_DECODER_EVENT_UNABLE_TO_MATCH_RESPONSE_TO_REQUEST,
     HTTP_DECODER_EVENT_INVALID_SERVER_PORT_IN_REQUEST,
@@ -106,11 +114,28 @@ enum {
     HTTP_DECODER_EVENT_REQUEST_LINE_LEADING_WHITESPACE,
     HTTP_DECODER_EVENT_TOO_MANY_ENCODING_LAYERS,
     HTTP_DECODER_EVENT_ABNORMAL_CE_HEADER,
+    HTTP_DECODER_EVENT_AUTH_UNRECOGNIZED,
+    HTTP_DECODER_EVENT_REQUEST_HEADER_REPETITION,
+    HTTP_DECODER_EVENT_RESPONSE_HEADER_REPETITION,
+    HTTP_DECODER_EVENT_RESPONSE_MULTIPART_BYTERANGES,
+    HTTP_DECODER_EVENT_RESPONSE_ABNORMAL_TRANSFER_ENCODING,
+    HTTP_DECODER_EVENT_RESPONSE_CHUNKED_OLD_PROTO,
+    HTTP_DECODER_EVENT_RESPONSE_INVALID_PROTOCOL,
+    HTTP_DECODER_EVENT_RESPONSE_INVALID_STATUS,
+    HTTP_DECODER_EVENT_REQUEST_LINE_INCOMPLETE,
+    HTTP_DECODER_EVENT_DOUBLE_ENCODED_URI,
+    HTTP_DECODER_EVENT_REQUEST_LINE_INVALID,
+    HTTP_DECODER_EVENT_REQUEST_BODY_UNEXPECTED,
+
+    HTTP_DECODER_EVENT_LZMA_MEMLIMIT_REACHED,
+    HTTP_DECODER_EVENT_COMPRESSION_BOMB,
 
     /* suricata errors/warnings */
     HTTP_DECODER_EVENT_MULTIPART_GENERIC_ERROR,
     HTTP_DECODER_EVENT_MULTIPART_NO_FILEDATA,
     HTTP_DECODER_EVENT_MULTIPART_INVALID_HEADER,
+
+    HTTP_DECODER_EVENT_TOO_MANY_WARNINGS,
 };
 
 typedef enum HtpSwfCompressType_ {
@@ -171,28 +196,22 @@ typedef struct HtpBody_ {
     uint64_t body_inspected;
 } HtpBody;
 
-#define HTP_CONTENTTYPE_SET     0x01    /**< We have the content type */
-#define HTP_BOUNDARY_SET        0x02    /**< We have a boundary string */
-#define HTP_BOUNDARY_OPEN       0x04    /**< We have a boundary string */
-#define HTP_FILENAME_SET        0x08   /**< filename is registered in the flow */
-#define HTP_DONTSTORE           0x10    /**< not storing this file */
+#define HTP_CONTENTTYPE_SET     BIT_U8(0)    /**< We have the content type */
+#define HTP_BOUNDARY_SET        BIT_U8(1)    /**< We have a boundary string */
+#define HTP_BOUNDARY_OPEN       BIT_U8(2)    /**< We have a boundary string */
+#define HTP_FILENAME_SET        BIT_U8(3)    /**< filename is registered in the flow */
+#define HTP_DONTSTORE           BIT_U8(4)    /**< not storing this file */
+#define HTP_STREAM_DEPTH_SET    BIT_U8(5)    /**< stream-depth is set */
 
 /** Now the Body Chunks will be stored per transaction, at
   * the tx user data */
 typedef struct HtpTxUserData_ {
-    /** detection engine flags */
-    uint64_t detect_flags_ts;
-    uint64_t detect_flags_tc;
-
     /* Body of the request (if any) */
     uint8_t request_body_init;
     uint8_t response_body_init;
 
     uint8_t request_has_trailers;
     uint8_t response_has_trailers;
-
-    /* indicates which loggers that have logged */
-    uint32_t logged;
 
     HtpBody request_body;
     HtpBody response_body;
@@ -206,7 +225,7 @@ typedef struct HtpTxUserData_ {
 
     AppLayerDecoderEvents *decoder_events;          /**< per tx events */
 
-    /** Holds the boundary identificator string if any (used on
+    /** Holds the boundary identification string if any (used on
      *  multipart/form-data only)
      */
     uint8_t *boundary;
@@ -218,6 +237,7 @@ typedef struct HtpTxUserData_ {
     uint8_t request_body_type;
 
     DetectEngineState *de_state;
+    AppLayerTxData tx_data;
 } HtpTxUserData;
 
 typedef struct HtpState_ {
@@ -225,7 +245,7 @@ typedef struct HtpState_ {
     htp_connp_t *connp;
     /* Connection structure for each connection */
     htp_conn_t *conn;
-    Flow *f;                /**< Needed to retrieve the original flow when usin HTPLib callbacks */
+    Flow *f;                /**< Needed to retrieve the original flow when using HTPLib callbacks */
     uint64_t transaction_cnt;
     uint64_t store_tx_id;
     FileContainer *files_ts;
@@ -234,6 +254,7 @@ typedef struct HtpState_ {
     uint16_t flags;
     uint16_t events;
     uint16_t htp_messages_offset; /**< offset into conn->messages list */
+    uint32_t file_track_id;             /**< used to assign file track ids to files */
     uint64_t last_request_data_stamp;
     uint64_t last_response_data_stamp;
 } HtpState;
@@ -248,10 +269,9 @@ typedef struct HtpState_ {
 /** part of the engine needs the request body (e.g. file_data keyword) */
 #define HTP_REQUIRE_RESPONSE_BODY       (1 << 3)
 
-SC_ATOMIC_DECLARE(uint32_t, htp_config_flags);
+SC_ATOMIC_EXTERN(uint32_t, htp_config_flags);
 
 void RegisterHTPParsers(void);
-void HTPParserRegisterTests(void);
 void HTPAtExitPrintStats(void);
 void HTPFreeConfig(void);
 
@@ -268,6 +288,8 @@ void HTPConfigure(void);
 
 void HtpConfigCreateBackup(void);
 void HtpConfigRestoreBackup(void);
+
+void *HtpGetTxForH2(void *);
 
 #endif	/* __APP_LAYER_HTP_H__ */
 

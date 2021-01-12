@@ -50,10 +50,17 @@ enum {
     TLS_DECODER_EVENT_TOO_MANY_RECORDS_IN_PACKET,
     /* Certificates decoding messages */
     TLS_DECODER_EVENT_INVALID_CERTIFICATE,
-    TLS_DECODER_EVENT_CERTIFICATE_MISSING_ELEMENT,
-    TLS_DECODER_EVENT_CERTIFICATE_UNKNOWN_ELEMENT,
     TLS_DECODER_EVENT_CERTIFICATE_INVALID_LENGTH,
-    TLS_DECODER_EVENT_CERTIFICATE_INVALID_STRING,
+    TLS_DECODER_EVENT_CERTIFICATE_INVALID_VERSION,
+    TLS_DECODER_EVENT_CERTIFICATE_INVALID_SERIAL,
+    TLS_DECODER_EVENT_CERTIFICATE_INVALID_ALGORITHMIDENTIFIER,
+    TLS_DECODER_EVENT_CERTIFICATE_INVALID_X509NAME,
+    TLS_DECODER_EVENT_CERTIFICATE_INVALID_DATE,
+    TLS_DECODER_EVENT_CERTIFICATE_INVALID_EXTENSIONS,
+    TLS_DECODER_EVENT_CERTIFICATE_INVALID_DER,
+    TLS_DECODER_EVENT_CERTIFICATE_INVALID_SUBJECT,
+    TLS_DECODER_EVENT_CERTIFICATE_INVALID_ISSUER,
+    TLS_DECODER_EVENT_CERTIFICATE_INVALID_VALIDITY,
     TLS_DECODER_EVENT_ERROR_MSG_ENCOUNTERED,
     TLS_DECODER_EVENT_INVALID_SSL_RECORD,
 };
@@ -186,7 +193,7 @@ typedef struct SSLStateConnp_ {
     uint32_t handshake_length;
 
     /* the no of bytes processed in the currently parsed record */
-    uint16_t bytes_processed;
+    uint32_t bytes_processed;
     /* the no of bytes processed in the currently parsed handshake */
     uint16_t hs_bytes_processed;
 
@@ -208,6 +215,9 @@ typedef struct SSLStateConnp_ {
 
     uint32_t cert_log_flag;
 
+    JA3Buffer *ja3_str;
+    char *ja3_hash;
+
     /* buffer for the tls record.
      * We use a malloced buffer, if the record is fragmented */
     uint8_t *trec;
@@ -223,15 +233,10 @@ typedef struct SSLStateConnp_ {
 typedef struct SSLState_ {
     Flow *f;
 
+    AppLayerTxData tx_data;
+
     /* holds some state flags we need */
     uint32_t flags;
-
-    /* specifies which loggers are done logging */
-    uint32_t logged;
-
-    /* detect flags */
-    uint64_t detect_flags_ts;
-    uint64_t detect_flags_tc;
 
     /* there might be a better place to store this*/
     uint16_t hb_record_len;
@@ -239,9 +244,6 @@ typedef struct SSLState_ {
     uint16_t events;
 
     uint32_t current_flags;
-
-    JA3Buffer *ja3_str;
-    char *ja3_hash;
 
     SSLStateConnp *curr_connp;
 
@@ -256,5 +258,7 @@ void RegisterSSLParsers(void);
 void SSLParserRegisterTests(void);
 void SSLSetEvent(SSLState *ssl_state, uint8_t event);
 void SSLVersionToString(uint16_t, char *);
+void SSLEnableJA3(void);
+bool SSLJA3IsEnabled(void);
 
 #endif /* __APP_LAYER_SSL_H__ */

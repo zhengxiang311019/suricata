@@ -1,4 +1,4 @@
-/* Copyright (C) 2010-2014 Open Information Security Foundation
+/* Copyright (C) 2010-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -47,7 +47,6 @@ TmModuleReceiveErfDagRegister(void)
     tmm_modules[TMM_RECEIVEERFDAG].Func = NULL;
     tmm_modules[TMM_RECEIVEERFDAG].ThreadExitPrintStats = NULL;
     tmm_modules[TMM_RECEIVEERFDAG].ThreadDeinit = NULL;
-    tmm_modules[TMM_RECEIVEERFDAG].RegisterTests = NULL;
     tmm_modules[TMM_RECEIVEERFDAG].cap_flags = SC_CAP_NET_ADMIN;
     tmm_modules[TMM_RECEIVEERFDAG].flags = TM_FLAG_RECEIVE_TM;
 }
@@ -60,7 +59,6 @@ TmModuleDecodeErfDagRegister(void)
     tmm_modules[TMM_DECODEERFDAG].Func = NULL;
     tmm_modules[TMM_DECODEERFDAG].ThreadExitPrintStats = NULL;
     tmm_modules[TMM_DECODEERFDAG].ThreadDeinit = NULL;
-    tmm_modules[TMM_DECODEERFDAG].RegisterTests = NULL;
     tmm_modules[TMM_DECODEERFDAG].cap_flags = 0;
     tmm_modules[TMM_DECODEERFDAG].flags = TM_FLAG_DECODE_TM;
 }
@@ -124,8 +122,7 @@ void ReceiveErfDagThreadExitStats(ThreadVars *, void *);
 TmEcode ReceiveErfDagThreadDeinit(ThreadVars *, void *);
 TmEcode DecodeErfDagThreadInit(ThreadVars *, void *, void **);
 TmEcode DecodeErfDagThreadDeinit(ThreadVars *tv, void *data);
-TmEcode DecodeErfDag(ThreadVars *, Packet *, void *, PacketQueue *,
-    PacketQueue *);
+TmEcode DecodeErfDag(ThreadVars *, Packet *, void *);
 void ReceiveErfDagCloseStream(int dagfd, int stream);
 
 /**
@@ -142,7 +139,6 @@ TmModuleReceiveErfDagRegister(void)
     tmm_modules[TMM_RECEIVEERFDAG].ThreadExitPrintStats =
         ReceiveErfDagThreadExitStats;
     tmm_modules[TMM_RECEIVEERFDAG].ThreadDeinit = NULL;
-    tmm_modules[TMM_RECEIVEERFDAG].RegisterTests = NULL;
     tmm_modules[TMM_RECEIVEERFDAG].cap_flags = 0;
     tmm_modules[TMM_RECEIVEERFDAG].flags = TM_FLAG_RECEIVE_TM;
 }
@@ -158,7 +154,6 @@ TmModuleDecodeErfDagRegister(void)
     tmm_modules[TMM_DECODEERFDAG].Func = DecodeErfDag;
     tmm_modules[TMM_DECODEERFDAG].ThreadExitPrintStats = NULL;
     tmm_modules[TMM_DECODEERFDAG].ThreadDeinit = DecodeErfDagThreadDeinit;
-    tmm_modules[TMM_DECODEERFDAG].RegisterTests = NULL;
     tmm_modules[TMM_DECODEERFDAG].cap_flags = 0;
     tmm_modules[TMM_DECODEERFDAG].flags = TM_FLAG_DECODE_TM;
 }
@@ -193,9 +188,8 @@ ReceiveErfDagThreadInit(ThreadVars *tv, void *initdata, void **data)
 
     ErfDagThreadVars *ewtn = SCMalloc(sizeof(ErfDagThreadVars));
     if (unlikely(ewtn == NULL)) {
-        SCLogError(SC_ERR_MEM_ALLOC,
-            "Failed to allocate memory for ERF DAG thread vars.");
-        exit(EXIT_FAILURE);
+            FatalError(SC_ERR_FATAL,
+                       "Failed to allocate memory for ERF DAG thread vars.");
     }
 
     memset(ewtn, 0, sizeof(*ewtn));
@@ -350,6 +344,7 @@ ReceiveErfDagLoop(ThreadVars *tv, void *data, void *slot)
         if (top == NULL) {
             if (errno == EAGAIN) {
                 if (dtv->dagstream & 0x1) {
+                    TmThreadsCaptureHandleTimeout(tv, NULL);
                     usleep(10 * 1000);
                     dtv->btm = dtv->top;
                 }
@@ -432,16 +427,17 @@ ProcessErfDagRecords(ErfDagThreadVars *ewtn, uint8_t *top, uint32_t *pkts_read)
 
         /* Only support ethernet at this time. */
         switch (hdr_type & 0x7f) {
-        case TYPE_PAD:
+        case ERF_TYPE_PAD:
+        case ERF_TYPE_META:
             /* Skip. */
             continue;
-        case TYPE_DSM_COLOR_ETH:
-        case TYPE_COLOR_ETH:
-        case TYPE_COLOR_HASH_ETH:
+        case ERF_TYPE_DSM_COLOR_ETH:
+        case ERF_TYPE_COLOR_ETH:
+        case ERF_TYPE_COLOR_HASH_ETH:
             /* In these types the color value overwrites the lctr
              * (drop count). */
             break;
-        case TYPE_ETH:
+        case ERF_TYPE_ETH:
             if (dr->lctr) {
                 StatsAddUI64(ewtn->tv, ewtn->drops, SCNtohs(dr->lctr));
             }
@@ -540,7 +536,6 @@ ProcessErfDagRecord(ErfDagThreadVars *ewtn, char *prec)
     ewtn->bytes += wlen;
 
     if (TmThreadsSlotProcessPkt(ewtn->tv, ewtn->slot, p) != TM_ECODE_OK) {
-        TmqhOutputPacketpool(ewtn->tv, p);
         SCReturnInt(TM_ECODE_FAILED);
     }
 
@@ -601,25 +596,20 @@ ReceiveErfDagCloseStream(int dagfd, int stream)
 /**
  * \brief   This function passes off to link type decoders.
  *
- * DecodeErfDag reads packets from the PacketQueue and passes
+ * DecodeErfDag decodes packets from DAG and passes
  * them off to the proper link type decoder.
  *
  * \param t pointer to ThreadVars
  * \param p pointer to the current packet
  * \param data pointer that gets cast into PcapThreadVars for ptv
- * \param pq pointer to the current PacketQueue
  */
 TmEcode
-DecodeErfDag(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq,
-    PacketQueue *postpq)
+DecodeErfDag(ThreadVars *tv, Packet *p, void *data)
 {
     SCEnter();
     DecodeThreadVars *dtv = (DecodeThreadVars *)data;
 
-    /* XXX HACK: flow timeout can call us for injected pseudo packets
-     *           see bug: https://redmine.openinfosecfoundation.org/issues/1107 */
-    if (p->flags & PKT_PSEUDO_STREAM_END)
-        return TM_ECODE_OK;
+    BUG_ON(PKT_IS_PSEUDOPKT(p));
 
     /* update counters */
     DecodeUpdatePacketCounters(tv, dtv, p);
@@ -627,7 +617,7 @@ DecodeErfDag(ThreadVars *tv, Packet *p, void *data, PacketQueue *pq,
         /* call the decoder */
     switch(p->datalink) {
         case LINKTYPE_ETHERNET:
-            DecodeEthernet(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p), pq);
+            DecodeEthernet(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p));
             break;
         default:
             SCLogError(SC_ERR_DATALINK_UNIMPLEMENTED,

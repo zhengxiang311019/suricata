@@ -35,6 +35,7 @@
 #include "detect-pcre.h"
 #include "detect-isdataat.h"
 #include "detect-bytetest.h"
+#include "detect-bytemath.h"
 #include "detect-bytejump.h"
 #include "detect-byte-extract.h"
 #include "detect-replace.h"
@@ -45,6 +46,8 @@
 #include "detect-lua.h"
 #include "detect-base64-decode.h"
 #include "detect-base64-data.h"
+#include "detect-dataset.h"
+#include "detect-datarep.h"
 
 #include "app-layer-dcerpc.h"
 
@@ -82,6 +85,7 @@
  * \param det_ctx         Detection engine thread context
  * \param s               Signature to inspect
  * \param sm              SigMatch to inspect
+ * \param p               Packet. Can be NULL.
  * \param f               Flow (for pcre flowvar storage)
  * \param buffer          Ptr to the buffer to inspect
  * \param buffer_len      Length of the payload
@@ -92,19 +96,17 @@
  * \param inspection_mode Refers to the engine inspection mode we are currently
  *                        inspecting.  Can be payload, stream, one of the http
  *                        buffer inspection modes or dce inspection mode.
- * \param data            Used to send some custom data.  For example in
- *                        payload inspection mode, data contains packet ptr,
- *                        and under dce inspection mode, contains dce state.
+ * \param flags           DETECT_CI_FLAG_*
  *
  *  \retval 0 no match
  *  \retval 1 match
  */
 int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
                                   const Signature *s, const SigMatchData *smd,
-                                  Flow *f,
-                                  uint8_t *buffer, uint32_t buffer_len,
+                                  Packet *p, Flow *f,
+                                  const uint8_t *buffer, uint32_t buffer_len,
                                   uint32_t stream_start_offset, uint8_t flags,
-                                  uint8_t inspection_mode, void *data)
+                                  uint8_t inspection_mode)
 {
     SCEnter();
     KEYWORD_PROFILING_START;
@@ -142,7 +144,7 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
 
         /* search for our pattern, checking the matches recursively.
          * if we match we look for the next SigMatch as well */
-        uint8_t *found = NULL;
+        const uint8_t *found = NULL;
         uint32_t offset = 0;
         uint32_t depth = buffer_len;
         uint32_t prev_offset = 0; /**< used in recursive searching */
@@ -158,8 +160,8 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
 
                 int distance = cd->distance;
                 if (cd->flags & DETECT_CONTENT_DISTANCE) {
-                    if (cd->flags & DETECT_CONTENT_DISTANCE_BE) {
-                        distance = det_ctx->bj_values[cd->distance];
+                    if (cd->flags & DETECT_CONTENT_DISTANCE_VAR) {
+                        distance = det_ctx->byte_values[cd->distance];
                     }
                     if (distance < 0 && (uint32_t)(abs(distance)) > offset)
                         offset = 0;
@@ -171,9 +173,9 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
                 }
 
                 if (cd->flags & DETECT_CONTENT_WITHIN) {
-                    if (cd->flags & DETECT_CONTENT_WITHIN_BE) {
-                        if ((int32_t)depth > (int32_t)(prev_buffer_offset + det_ctx->bj_values[cd->within] + distance)) {
-                            depth = prev_buffer_offset + det_ctx->bj_values[cd->within] + distance;
+                    if (cd->flags & DETECT_CONTENT_WITHIN_VAR) {
+                        if ((int32_t)depth > (int32_t)(prev_buffer_offset + det_ctx->byte_values[cd->within] + distance)) {
+                            depth = prev_buffer_offset + det_ctx->byte_values[cd->within] + distance;
                         }
                     } else {
                         if ((int32_t)depth > (int32_t)(prev_buffer_offset + cd->within + distance)) {
@@ -195,9 +197,9 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
                     }
                 }
 
-                if (cd->flags & DETECT_CONTENT_DEPTH_BE) {
-                    if ((det_ctx->bj_values[cd->depth] + prev_buffer_offset) < depth) {
-                        depth = prev_buffer_offset + det_ctx->bj_values[cd->depth];
+                if (cd->flags & DETECT_CONTENT_DEPTH_VAR) {
+                    if ((det_ctx->byte_values[cd->depth] + prev_buffer_offset) < depth) {
+                        depth = prev_buffer_offset + det_ctx->byte_values[cd->depth];
                     }
                 } else {
                     if (cd->depth != 0) {
@@ -209,9 +211,9 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
                     }
                 }
 
-                if (cd->flags & DETECT_CONTENT_OFFSET_BE) {
-                    if (det_ctx->bj_values[cd->offset] > offset)
-                        offset = det_ctx->bj_values[cd->offset];
+                if (cd->flags & DETECT_CONTENT_OFFSET_VAR) {
+                    if (det_ctx->byte_values[cd->offset] > offset)
+                        offset = det_ctx->byte_values[cd->offset];
                 } else {
                     if (cd->offset > offset) {
                         offset = cd->offset;
@@ -220,8 +222,8 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
                 }
             } else { /* implied no relative matches */
                 /* set depth */
-                if (cd->flags & DETECT_CONTENT_DEPTH_BE) {
-                    depth = det_ctx->bj_values[cd->depth];
+                if (cd->flags & DETECT_CONTENT_DEPTH_VAR) {
+                    depth = det_ctx->byte_values[cd->depth];
                 } else {
                     if (cd->depth != 0) {
                         depth = cd->depth;
@@ -239,15 +241,22 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
                 }
 
                 /* set offset */
-                if (cd->flags & DETECT_CONTENT_OFFSET_BE)
-                    offset = det_ctx->bj_values[cd->offset];
+                if (cd->flags & DETECT_CONTENT_OFFSET_VAR)
+                    offset = det_ctx->byte_values[cd->offset];
                 else
                     offset = cd->offset;
                 prev_buffer_offset = 0;
             }
 
+            /* If the value came from a variable, make sure to adjust the depth so it's relative
+             * to the offset value.
+             */
+            if (cd->flags & (DETECT_CONTENT_DISTANCE_VAR|DETECT_CONTENT_OFFSET_VAR|DETECT_CONTENT_DEPTH_VAR)) {
+                 depth += offset;
+            }
+
             /* update offset with prev_offset if we're searching for
-             * matches after the first occurence. */
+             * matches after the first occurrence. */
             SCLogDebug("offset %"PRIu32", prev_offset %"PRIu32, offset, prev_offset);
             if (prev_offset != 0)
                 offset = prev_offset;
@@ -267,7 +276,7 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
                 }
             }
 
-            uint8_t *sbuffer = buffer + offset;
+            const uint8_t *sbuffer = buffer + offset;
             uint32_t sbuffer_len = depth - offset;
             uint32_t match_offset = 0;
             SCLogDebug("sbuffer_len %"PRIu32, sbuffer_len);
@@ -314,8 +323,9 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
                     /* Match branch, add replace to the list if needed */
                     if (cd->flags & DETECT_CONTENT_REPLACE) {
                         if (inspection_mode == DETECT_ENGINE_CONTENT_INSPECTION_MODE_PAYLOAD) {
-                            /* we will need to replace content if match is confirmed */
-                            det_ctx->replist = DetectReplaceAddToList(det_ctx->replist, found, cd);
+                            /* we will need to replace content if match is confirmed
+                             * cast to non-const as replace writes to it. */
+                            det_ctx->replist = DetectReplaceAddToList(det_ctx->replist, (uint8_t *)found, cd);
                         } else {
                             SCLogWarning(SC_ERR_INVALID_VALUE, "Can't modify payload without packet");
                         }
@@ -330,11 +340,11 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
                     KEYWORD_PROFILING_END(det_ctx, smd->type, 1);
 
                     /* see if the next buffer keywords match. If not, we will
-                     * search for another occurence of this content and see
+                     * search for another occurrence of this content and see
                      * if the others match then until we run out of matches */
                     int r = DetectEngineContentInspection(de_ctx, det_ctx, s, smd+1,
-                            f, buffer, buffer_len, stream_start_offset, flags,
-                            inspection_mode, data);
+                            p, f, buffer, buffer_len, stream_start_offset, flags,
+                            inspection_mode);
                     if (r == 1) {
                         SCReturnInt(1);
                     }
@@ -366,8 +376,8 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
 
         const DetectIsdataatData *id = (DetectIsdataatData *)smd->ctx;
         uint32_t dataat = id->dataat;
-        if (id->flags & ISDATAAT_OFFSET_BE) {
-            uint64_t be_value = det_ctx->bj_values[dataat];
+        if (id->flags & ISDATAAT_OFFSET_VAR) {
+            uint64_t be_value = det_ctx->byte_values[dataat];
             if (be_value >= 100000000) {
                 if ((id->flags & ISDATAAT_NEGATED) == 0) {
                     SCLogDebug("extracted value %"PRIu64" very big: no match", be_value);
@@ -415,9 +425,6 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
 
         det_ctx->pcre_match_start_offset = 0;
         do {
-            Packet *p = NULL;
-            if (inspection_mode == DETECT_ENGINE_CONTENT_INSPECTION_MODE_PAYLOAD)
-                p = (Packet *)data;
             r = DetectPcrePayloadMatch(det_ctx, s, smd, p, f,
                                        buffer, buffer_len);
             if (r == 0) {
@@ -434,11 +441,11 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
             prev_offset = det_ctx->pcre_match_start_offset;
 
             /* see if the next payload keywords match. If not, we will
-             * search for another occurence of this pcre and see
+             * search for another occurrence of this pcre and see
              * if the others match, until we run out of matches */
             r = DetectEngineContentInspection(de_ctx, det_ctx, s, smd+1,
-                    f, buffer, buffer_len, stream_start_offset, flags,
-                    inspection_mode, data);
+                    p, f, buffer, buffer_len, stream_start_offset, flags,
+                    inspection_mode);
             if (r == 1) {
                 SCReturnInt(1);
             }
@@ -455,20 +462,19 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
         uint8_t btflags = btd->flags;
         int32_t offset = btd->offset;
         uint64_t value = btd->value;
-        if (btflags & DETECT_BYTETEST_OFFSET_BE) {
-            offset = det_ctx->bj_values[offset];
+        if (btflags & DETECT_BYTETEST_OFFSET_VAR) {
+            offset = det_ctx->byte_values[offset];
         }
-        if (btflags & DETECT_BYTETEST_VALUE_BE) {
-            value = det_ctx->bj_values[value];
+        if (btflags & DETECT_BYTETEST_VALUE_VAR) {
+            value = det_ctx->byte_values[value];
         }
 
         /* if we have dce enabled we will have to use the endianness
          * specified by the dce header */
-        if (btflags & DETECT_BYTETEST_DCE && data != NULL) {
-            DCERPCState *dcerpc_state = (DCERPCState *)data;
+        if (btflags & DETECT_BYTETEST_DCE) {
             /* enable the endianness flag temporarily.  once we are done
              * processing we reset the flags to the original value*/
-            btflags |= ((dcerpc_state->dcerpc.dcerpchdr.packed_drep[0] & 0x10) ?
+            btflags |= ((flags & DETECT_CI_FLAGS_DCE_LE) ?
                       DETECT_BYTETEST_LITTLE: 0);
         }
 
@@ -481,20 +487,19 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
 
     } else if (smd->type == DETECT_BYTEJUMP) {
         DetectBytejumpData *bjd = (DetectBytejumpData *)smd->ctx;
-        uint8_t bjflags = bjd->flags;
+        uint16_t bjflags = bjd->flags;
         int32_t offset = bjd->offset;
 
-        if (bjflags & DETECT_BYTEJUMP_OFFSET_BE) {
-            offset = det_ctx->bj_values[offset];
+        if (bjflags & DETECT_CONTENT_OFFSET_VAR) {
+            offset = det_ctx->byte_values[offset];
         }
 
         /* if we have dce enabled we will have to use the endianness
          * specified by the dce header */
-        if (bjflags & DETECT_BYTEJUMP_DCE && data != NULL) {
-            DCERPCState *dcerpc_state = (DCERPCState *)data;
+        if (bjflags & DETECT_BYTEJUMP_DCE) {
             /* enable the endianness flag temporarily.  once we are done
              * processing we reset the flags to the original value*/
-            bjflags |= ((dcerpc_state->dcerpc.dcerpchdr.packed_drep[0] & 0x10) ?
+            bjflags |= ((flags & DETECT_CI_FLAGS_DCE_LE) ?
                       DETECT_BYTEJUMP_LITTLE: 0);
         }
 
@@ -513,22 +518,60 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
         /* if we have dce enabled we will have to use the endianness
          * specified by the dce header */
         if ((bed->flags & DETECT_BYTE_EXTRACT_FLAG_ENDIAN) &&
-            endian == DETECT_BYTE_EXTRACT_ENDIAN_DCE && data != NULL) {
+            endian == DETECT_BYTE_EXTRACT_ENDIAN_DCE &&
+            flags & (DETECT_CI_FLAGS_DCE_LE|DETECT_CI_FLAGS_DCE_BE)) {
 
-            DCERPCState *dcerpc_state = (DCERPCState *)data;
             /* enable the endianness flag temporarily.  once we are done
              * processing we reset the flags to the original value*/
-            endian |= ((dcerpc_state->dcerpc.dcerpchdr.packed_drep[0] == 0x10) ?
+            endian |= ((flags & DETECT_CI_FLAGS_DCE_LE) ?
                        DETECT_BYTE_EXTRACT_ENDIAN_LITTLE : DETECT_BYTE_EXTRACT_ENDIAN_BIG);
         }
 
         if (DetectByteExtractDoMatch(det_ctx, smd, s, buffer,
                                      buffer_len,
-                                     &det_ctx->bj_values[bed->local_id],
+                                     &det_ctx->byte_values[bed->local_id],
                                      endian) != 1) {
             goto no_match;
         }
 
+        SCLogDebug("[BE] Fetched value for index %d: %"PRIu64,
+                   bed->local_id, det_ctx->byte_values[bed->local_id]);
+        goto match;
+
+    } else if (smd->type == DETECT_BYTEMATH) {
+
+        DetectByteMathData *bmd = (DetectByteMathData *)smd->ctx;
+        uint8_t endian = bmd->endian;
+
+        /* if we have dce enabled we will have to use the endianness
+         * specified by the dce header */
+        if ((bmd->flags & DETECT_BYTEMATH_FLAG_ENDIAN) &&
+            endian == DETECT_BYTEMATH_ENDIAN_DCE &&
+            flags & (DETECT_CI_FLAGS_DCE_LE|DETECT_CI_FLAGS_DCE_BE)) {
+
+            /* enable the endianness flag temporarily.  once we are done
+             * processing we reset the flags to the original value*/
+            endian |= ((flags & DETECT_CI_FLAGS_DCE_LE) ?
+                       DETECT_BYTEMATH_ENDIAN_LITTLE : DETECT_BYTEMATH_ENDIAN_BIG);
+        }
+        uint64_t rvalue;
+        if (bmd->flags & DETECT_BYTEMATH_RVALUE_VAR) {
+             rvalue = det_ctx->byte_values[bmd->local_id];
+        } else {
+             rvalue = bmd->rvalue;
+        }
+
+
+        if (DetectByteMathDoMatch(det_ctx, smd, s, buffer,
+                                     buffer_len,
+                                     rvalue,
+                                     &det_ctx->byte_values[bmd->local_id],
+                                     endian) != 1) {
+            goto no_match;
+        }
+
+        SCLogDebug("[BM] Fetched value for index %d: %"PRIu64,
+                   bmd->local_id, det_ctx->byte_values[bmd->local_id]);
         goto match;
 
     } else if (smd->type == DETECT_BSIZE) {
@@ -544,6 +587,28 @@ int DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
             goto no_match;
         }
         goto match;
+
+    } else if (smd->type == DETECT_DATASET) {
+
+        //PrintRawDataFp(stdout, buffer, buffer_len);
+        const DetectDatasetData *sd = (const DetectDatasetData *) smd->ctx;
+        int r = DetectDatasetBufferMatch(det_ctx, sd, buffer, buffer_len); //TODO buffer offset?
+        if (r == 1) {
+            goto match;
+        }
+        det_ctx->discontinue_matching = 1;
+        goto no_match;
+
+    } else if (smd->type == DETECT_DATAREP) {
+
+        //PrintRawDataFp(stdout, buffer, buffer_len);
+        const DetectDatarepData *sd = (const DetectDatarepData *) smd->ctx;
+        int r = DetectDatarepBufferMatch(det_ctx, sd, buffer, buffer_len); //TODO buffer offset?
+        if (r == 1) {
+            goto match;
+        }
+        det_ctx->discontinue_matching = 1;
+        goto no_match;
 
     } else if (smd->type == DETECT_AL_URILEN) {
         SCLogDebug("inspecting uri len");
@@ -620,8 +685,8 @@ match:
     if (!smd->is_last) {
         KEYWORD_PROFILING_END(det_ctx, smd->type, 1);
         int r = DetectEngineContentInspection(de_ctx, det_ctx, s, smd+1,
-                f, buffer, buffer_len, stream_start_offset, flags,
-                inspection_mode, data);
+                p, f, buffer, buffer_len, stream_start_offset, flags,
+                inspection_mode);
         SCReturnInt(r);
     }
 final_match:

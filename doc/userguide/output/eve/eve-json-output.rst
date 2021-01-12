@@ -3,7 +3,7 @@
 Eve JSON Output
 ===============
 
-The EVE output facility outputs alerts, metadata, file info and protocol
+The EVE output facility outputs alerts, anomalies, metadata, file info and protocol
 specific records through JSON.
 
 The most common way to use this is through 'EVE', which is a firehose approach
@@ -13,6 +13,9 @@ where all these logs go into a single file.
 
 Each alert, http log, etc will go into this one file: 'eve.json'. This file
 can then be processed by 3rd party tools like Logstash (ELK) or jq.
+
+If ``ethernet`` is set to yes, then ethernet headers will be added to events
+if available.
 
 Output types
 ~~~~~~~~~~~~
@@ -24,12 +27,16 @@ Output types::
 
       filetype: regular #regular|syslog|unix_dgram|unix_stream|redis
       filename: eve.json
+      # Enable for multi-threaded eve.json output; output files are amended
+      # with an identifier, e.g., eve.9.json. Default: off
+      #threaded: off
       #prefix: "@cee: " # prefix to prepend to each log entry
       # the following are valid when type: syslog above
       #identity: "suricata"
       #facility: local5
       #level: Info ## possible levels: Emergency, Alert, Critical,
                    ## Error, Warning, Notice, Info, Debug
+      #ethernet: no # log ethernet header in events when available
       #redis:
       #  server: 127.0.0.1
       #  port: 6379
@@ -60,8 +67,8 @@ Metadata::
             #payload-buffer-size: 4kb # max size of payload buffer to output in eve-log
             #payload-printable: yes   # enable dumping payload in printable (lossy) format
             #packet: yes              # enable dumping of packet (without stream segments)
-            #http-body: yes           # enable dumping of http body in Base64
-            #http-body-printable: yes # enable dumping of http body in printable format
+            #http-body: yes           # Requires metadata; enable dumping of http body in Base64
+            #http-body-printable: yes # Requires metadata; enable dumping of http body in printable format
 
             # metadata:
 
@@ -79,14 +86,179 @@ Metadata::
                 # Log the raw rule text.
                 #raw: false
 
+Anomaly
+~~~~~~~
+
+Anomalies are event records created when packets with unexpected or anomalous
+values are handled. These events include conditions such as incorrect protocol
+values, incorrect protocol length values, and other conditions which render the
+packet suspect. Other conditions may occur during the normal progression of a stream;
+these are termed ``stream`` events are include control sequences with incorrect
+values or that occur out of expected sequence.
+
+Anomalies are reported by and configured by type:
+
+- Decode
+- Stream
+- Application layer
+
+Metadata::
+
+    - anomaly:
+        # Anomaly log records describe unexpected conditions such as truncated packets,
+        # packets with invalid IP/UDP/TCP length values, and other events that render
+        # the packet invalid for further processing or describe unexpected behavior on
+        # an established stream. Networks which experience high occurrences of
+        # anomalies may experience packet processing degradation.
+        #
+        # Anomalies are reported for the following:
+        # 1. Decode: Values and conditions that are detected while decoding individual
+        #    packets. This includes invalid or unexpected values for low-level protocol
+        #    lengths as well.
+        # 2. Stream: This includes stream related events (TCP 3-way handshake issues,
+        #    unexpected sequence number, etc).
+        # 3. Application layer: These denote application layer specific conditions that
+        #    are unexpected, invalid or are unexpected given the application monitoring
+        #    state.
+        #
+        # By default, anomaly logging is disabled. When anomaly logging is enabled,
+        # application-layer anomaly reporting is enabled.
+        #
+        # Choose one or both types of anomaly logging and whether to enable
+        # logging of the packet header for packet anomalies.
+        types:
+          #decode: no
+          #stream: no
+          #applayer: yes
+        #packethdr: no
+
+HTTP
+~~~~
+
+HTTP transaction logging.
+
+Config::
+
+    - http:
+        extended: yes     # enable this for extended logging information
+        # custom allows additional http fields to be included in eve-log
+        # the example below adds three additional fields when uncommented
+        #custom: [Accept-Encoding, Accept-Language, Authorization]
+        # set this value to one among {both, request, response} to dump all
+        # http headers for every http request and/or response
+        # dump-all-headers: [both, request, response]
+
+List of custom fields:
+
+======================  ======================
+Yaml Option             HTTP Header
+======================  ======================
+accept                  accept
+accept_charset          accept-charset
+accept_encoding         accept-encoding
+accept_language         accept-language
+accept_datetime         accept-datetime
+authorization           authorization
+cache_control           cache-control
+cookie                  cookie
+from                    from
+max_forwards            max-forwards
+origin                  origin
+pragma                  pragma
+proxy_authorization     proxy-authorization
+range                   range
+te                      te
+via                     via
+x_requested_with        x-requested-with
+dnt                     dnt
+x_forwarded_proto       x-forwarded-proto
+x_authenticated_user    x-authenticated-user
+x_flash_version         x-flash-version
+accept_range            accept-range
+age                     age
+allow                   allow
+connection              connection
+content_encoding        content-encoding
+content_language        content-language
+content_length          content-length
+content_location        content-location
+content_md5             content-md5
+content_range           content-range
+content_type            content-type
+date                    date
+etag                    etags
+expires                 expires
+last_modified           last-modified
+link                    link
+location                location
+proxy_authenticate      proxy-authenticate
+referrer                referrer
+refresh                 refresh
+retry_after             retry-after
+server                  server
+set_cookie              set-cookie
+trailer                 trailer
+transfer_encoding       transfer-encoding
+upgrade                 upgrade
+vary                    vary
+warning                 warning
+www_authenticate        www-authenticate
+true_client_ip          true-client-ip
+org_src_ip              org-src-ip
+x_bluecoat_via          x-bluecoat-via
+======================  ======================
+
+In the ``custom`` option values from both columns can be used. The
+``HTTP Header`` column is case insensitive.
+
 DNS
 ~~~
 
-DNS records are logged one log record per query/answer record.
+.. note:: As of Suricata 5.0, the version 2 format of the EVE DNS log
+          is the default.
+
+DNS records are logged as one entry for the request, and one entry for
+the response.
 
 YAML::
 
         - dns:
+            # As of Suricata 5.0, version 2 of the eve dns output
+            # format is the default.
+            #version: 2
+
+            # Enable/disable this logger. Default: enabled.
+            #enabled: yes
+
+            # Control logging of requests and responses:
+            # - requests: enable logging of DNS queries
+            # - responses: enable logging of DNS answers
+            # By default both requests and responses are logged.
+            #requests: no
+            #responses: no
+
+            # Format of answer logging:
+            # - detailed: array item per answer
+            # - grouped: answers aggregated by type
+            # Default: all
+            #formats: [detailed, grouped]
+
+            # Types to log, based on the query type.
+            # Default: all.
+            #types: [a, aaaa, cname, mx, ns, ptr, txt]
+
+DNS v1 Format
+~~~~~~~~~~~~~
+
+The version 1 DNS output has been obsoleted by the version 2 output
+above. The v1 format logs a record per answer in the response possibly
+resulting in much more than 2 log records per request and response.
+
+YAML::
+
+        - dns:
+            # Must set the version to 1 to get the old style format.
+            version: 1
             # control logging of queries and answers
             # default yes, no to disable
             query: yes     # enable logging of DNS queries
@@ -109,7 +281,7 @@ YAML::
             extended: yes     # enable this for extended logging information
             # custom allows to control which tls fields that are included
             # in eve-log
-            #custom: [subject, issuer, serial, fingerprint, sni, version, not_before, not_after, certificate, chain, ja3]
+            #custom: [subject, issuer, serial, fingerprint, sni, version, not_before, not_after, certificate, chain, ja3, ja3s]
 
 The default is to log certificate subject and issuer. If ``extended`` is
 enabled, then the log gets more verbose.
@@ -132,6 +304,26 @@ C library should be supported. See the man page for ``strftime`` for all support
 modifiers.
 
 .. _output_eve_rotate:
+
+Threaded file output
+~~~~~~~~~~~~~~~~~~~~
+
+By default, all output is written to the named filename in the outputs section. The ``threaded`` option enables
+each output thread to write to individual files. In this case, the ``filename`` will include a unique identifier.
+
+With ``threaded`` enabled, the output will be split among many files -- and
+the aggregate of each file's contents must be treated together.
+
+::
+
+   outputs:
+     - eve-log:
+         filename: eve.json
+         threaded: on
+
+This example will cause each Suricata thread to write to its own "eve.json" file. Filenames are constructed
+by adding a unique identifier to the filename.  For example, ``eve.7.json``.
+
 
 Rotate log file
 ~~~~~~~~~~~~~~~
@@ -162,6 +354,8 @@ The example above rotates eve-log each 30 seconds. This could be replaced with
 ``30m`` to rotate every 30 minutes, ``30h`` to rotate every 30 hours, ``30d``
 to rotate every 30 days, or ``30w`` to rotate every 30 weeks.
 
+.. _multiple-eve-instances:
+
 Multiple Logger Instances
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -189,43 +383,14 @@ It is possible to have multiple 'EVE' instances, for example the following is va
 
 So here the alerts and drops go into 'eve-ips.json', while http, dns and tls go into 'eve-nsm.json'.
 
-In addition to this, each log can be handled completely separately:
+With the exception of ``drop``, you can specify multiples of the same
+logger type, however, ``drop`` can only be used once.
 
-::
-
-  outputs:
-    - alert-json-log:
-        enabled: yes
-        filename: alert-json.log
-    - dns-json-log:
-        enabled: yes
-        filename: dns-json.log
-    - drop-json-log:
-        enabled: yes
-        filename: drop-json.log
-    - http-json-log:
-        enabled: yes
-        filename: http-json.log
-    - ssh-json-log:
-        enabled: yes
-        filename: ssh-json.log
-    - tls-json-log:
-        enabled: yes
-        filename: tls-json.log
-
-For most output types, you can add multiple:
-
-::
-
-  outputs:
-    - alert-json-log:
-        enabled: yes
-        filename: alert-json1.log
-    - alert-json-log:
-        enabled: yes
-        filename: alert-json2.log
-
-Except for ``drop`` for which only a single logger instance is supported.
+.. note:: The use of independent json loggers such as alert-json-log,
+          dns-json-log, etc. has been deprecated and will be removed
+          by June 2020. Please use multiple eve-log instances as
+          documented above instead. Please see the `deprecation
+          policy`_ for more information.
 
 File permissions
 ~~~~~~~~~~~~~~~~
@@ -335,3 +500,13 @@ YAML::
       community-id: false
       # Seed value for the ID output. Valid values are 0-65535.
       community-id-seed: 0
+
+Multi Tenancy
+-------------
+
+Suricata can be configured to support multiple tenants with different detection
+engine configurations. When these tenants are configured and the detection
+engine is running then all EVE logging will also report the ``tenant_id`` field
+for traffic matching a specific tenant.
+
+.. _deprecation policy: https://suricata-ids.org/about/deprecation-policy/

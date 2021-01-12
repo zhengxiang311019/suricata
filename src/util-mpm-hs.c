@@ -107,8 +107,7 @@ static void SCHSSetAllocators(void)
 {
     hs_error_t err = hs_set_allocator(SCHSMalloc, SCHSFree);
     if (err != HS_SUCCESS) {
-        SCLogError(SC_ERR_FATAL, "Failed to set Hyperscan allocator.");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Failed to set Hyperscan allocator.");
     }
 }
 
@@ -312,6 +311,17 @@ static int SCHSAddPattern(MpmCtx *mpm_ctx, uint8_t *pat, uint16_t patlen,
         SCHSInitHashAdd(ctx, p);
 
         mpm_ctx->pattern_cnt++;
+
+        if (!(mpm_ctx->flags & MPMCTX_FLAGS_NODEPTH)) {
+            if (depth) {
+                mpm_ctx->maxdepth = MAX(mpm_ctx->maxdepth, depth);
+                SCLogDebug("%p: depth %u max %u", mpm_ctx, depth, mpm_ctx->maxdepth);
+            } else {
+                mpm_ctx->flags |= MPMCTX_FLAGS_NODEPTH;
+                mpm_ctx->maxdepth = 0;
+                SCLogDebug("%p: alas, no depth for us", mpm_ctx);
+            }
+        }
 
         if (mpm_ctx->maxlen < patlen)
             mpm_ctx->maxlen = patlen;
@@ -773,14 +783,12 @@ void SCHSInitThreadCtx(MpmCtx *mpm_ctx, MpmThreadCtx *mpm_thread_ctx)
     SCMutexUnlock(&g_scratch_proto_mutex);
 
     if (err != HS_SUCCESS) {
-        SCLogError(SC_ERR_FATAL, "Unable to clone scratch prototype");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Unable to clone scratch prototype");
     }
 
     err = hs_scratch_size(ctx->scratch, &ctx->scratch_size);
     if (err != HS_SUCCESS) {
-        SCLogError(SC_ERR_FATAL, "Unable to query scratch size");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "Unable to query scratch size");
     }
 
     mpm_thread_ctx->memory_cnt++;

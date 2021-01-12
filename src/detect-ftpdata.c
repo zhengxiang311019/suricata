@@ -1,4 +1,4 @@
-/* Copyright (C) 2017 Open Information Security Foundation
+/* Copyright (C) 2017-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -38,21 +38,20 @@
  * \brief Regex for parsing our keyword options
  */
 #define PARSE_REGEX  "^\\s*(stor|retr)\\s*$"
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
 /* Prototypes of functions registered in DetectFtpdataRegister below */
-static int DetectFtpdataMatch(ThreadVars *, DetectEngineThreadCtx *,
+static int DetectFtpdataMatch(DetectEngineThreadCtx *,
         Flow *, uint8_t, void *, void *,
         const Signature *, const SigMatchCtx *);
 static int DetectFtpdataSetup (DetectEngineCtx *, Signature *, const char *);
-static void DetectFtpdataFree (void *);
+static void DetectFtpdataFree (DetectEngineCtx *, void *);
+#ifdef UNITTESTS
 static void DetectFtpdataRegisterTests (void);
-static int DetectEngineInspectFtpdataGeneric(ThreadVars *tv,
-        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const Signature *s, const SigMatchData *smd,
-        Flow *f, uint8_t flags, void *alstate,
-        void *txv, uint64_t tx_id);
+#endif
+static int DetectEngineInspectFtpdataGeneric(DetectEngineCtx *de_ctx,
+        DetectEngineThreadCtx *det_ctx, const struct DetectEngineAppInspectionEngine_ *engine,
+        const Signature *s, Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id);
 static int g_ftpdata_buffer_id = 0;
 
 /**
@@ -65,7 +64,7 @@ void DetectFtpdataRegister(void) {
     sigmatch_table[DETECT_FTPDATA].name = "ftpdata_command";
     /* description: listed in "suricata --list-keywords=all" */
     sigmatch_table[DETECT_FTPDATA].desc = "match FTP command triggering a FTP data channel";
-    sigmatch_table[DETECT_FTPDATA].url = DOC_URL DOC_VERSION "/rules/ftp-keywords#ftpdata_command";
+    sigmatch_table[DETECT_FTPDATA].url = "/rules/ftp-keywords.html#ftpdata-command";
     sigmatch_table[DETECT_FTPDATA].AppLayerTxMatch = DetectFtpdataMatch;
     /* setup function is called during signature parsing, when the ftpcommand
      * keyword is encountered in the rule */
@@ -74,29 +73,26 @@ void DetectFtpdataRegister(void) {
      * shutdown, but also during rule reloads. */
     sigmatch_table[DETECT_FTPDATA].Free = DetectFtpdataFree;
     /* registers unittests into the system */
+#ifdef UNITTESTS
     sigmatch_table[DETECT_FTPDATA].RegisterTests = DetectFtpdataRegisterTests;
+#endif
+    DetectAppLayerInspectEngineRegister2("ftpdata_command", ALPROTO_FTPDATA, SIG_FLAG_TOSERVER, 0,
+            DetectEngineInspectFtpdataGeneric, NULL);
 
-    DetectAppLayerInspectEngineRegister("ftpdata_command",
-            ALPROTO_FTPDATA, SIG_FLAG_TOSERVER, 0,
-            DetectEngineInspectFtpdataGeneric);
-
-    DetectAppLayerInspectEngineRegister("ftpdata_command",
-            ALPROTO_FTPDATA, SIG_FLAG_TOCLIENT, 0,
-            DetectEngineInspectFtpdataGeneric);
+    DetectAppLayerInspectEngineRegister2("ftpdata_command", ALPROTO_FTPDATA, SIG_FLAG_TOCLIENT, 0,
+            DetectEngineInspectFtpdataGeneric, NULL);
     g_ftpdata_buffer_id = DetectBufferTypeGetByName("ftpdata_command");
 
     /* set up the PCRE for keyword parsing */
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
-static int DetectEngineInspectFtpdataGeneric(ThreadVars *tv,
-        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const Signature *s, const SigMatchData *smd,
-        Flow *f, uint8_t flags, void *alstate,
-        void *txv, uint64_t tx_id)
+static int DetectEngineInspectFtpdataGeneric(DetectEngineCtx *de_ctx,
+        DetectEngineThreadCtx *det_ctx, const struct DetectEngineAppInspectionEngine_ *engine,
+        const Signature *s, Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
 {
-    return DetectEngineInspectGenericList(tv, de_ctx, det_ctx, s, smd,
-                                          f, flags, alstate, txv, tx_id);
+    return DetectEngineInspectGenericList(
+            de_ctx, det_ctx, s, engine->smd, f, flags, alstate, txv, tx_id);
 }
 
 /**
@@ -109,7 +105,7 @@ static int DetectEngineInspectFtpdataGeneric(ThreadVars *tv,
  * \retval 0 no match
  * \retval 1 match
  */
-static int DetectFtpdataMatch(ThreadVars *t, DetectEngineThreadCtx *det_ctx,
+static int DetectFtpdataMatch(DetectEngineThreadCtx *det_ctx,
         Flow *f, uint8_t flags,
         void *state, void *txv,
         const Signature *s, const SigMatchCtx *m)
@@ -145,19 +141,15 @@ static DetectFtpdataData *DetectFtpdataParse(const char *ftpcommandstr)
 {
     DetectFtpdataData *ftpcommandd = NULL;
     char arg1[5] = "";
-#define MAX_SUBSTRINGS 30
-    int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
 
-    ret = pcre_exec(parse_regex, parse_regex_study,
-                    ftpcommandstr, strlen(ftpcommandstr),
-                    0, 0, ov, MAX_SUBSTRINGS);
+    int ret = DetectParsePcreExec(&parse_regex, ftpcommandstr, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret != 2) {
         SCLogError(SC_ERR_PCRE_MATCH, "parse error, ret %" PRId32 "", ret);
         goto error;
     }
 
-    res = pcre_copy_substring((char *) ftpcommandstr, ov, MAX_SUBSTRINGS, 1, arg1, sizeof(arg1));
+    int res = pcre_copy_substring((char *) ftpcommandstr, ov, MAX_SUBSTRINGS, 1, arg1, sizeof(arg1));
     if (res < 0) {
         SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_copy_substring failed");
         goto error;
@@ -176,7 +168,6 @@ static DetectFtpdataData *DetectFtpdataParse(const char *ftpcommandstr)
         goto error;
     }
 
-
     return ftpcommandd;
 
 error:
@@ -191,40 +182,30 @@ error:
  *
  * \param de_ctx pointer to the Detection Engine Context
  * \param s pointer to the Current Signature
- * \param ftpcommandstr pointer to the user provided ftpcommand options
+ * \param str pointer to the user provided ftpcommand options
  *
  * \retval 0 on Success
  * \retval -1 on Failure
  */
-static int DetectFtpdataSetup(DetectEngineCtx *de_ctx, Signature *s, const char *ftpcommandstr)
+static int DetectFtpdataSetup(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    DetectFtpdataData *ftpcommandd = NULL;
-    SigMatch *sm = NULL;
-
     if (DetectSignatureSetAppProto(s, ALPROTO_FTPDATA) != 0)
         return -1;
 
-    ftpcommandd = DetectFtpdataParse(ftpcommandstr);
+    DetectFtpdataData *ftpcommandd = DetectFtpdataParse(str);
     if (ftpcommandd == NULL)
-        goto error;
+        return -1;
 
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        goto error;
-
+    SigMatch *sm = SigMatchAlloc();
+    if (sm == NULL) {
+        DetectFtpdataFree(de_ctx, ftpcommandd);
+        return -1;
+    }
     sm->type = DETECT_FTPDATA;
     sm->ctx = (void *)ftpcommandd;
 
     SigMatchAppendSMToList(s, sm, g_ftpdata_buffer_id);
-
     return 0;
-
-error:
-    if (ftpcommandd != NULL)
-        DetectFtpdataFree(ftpcommandd);
-    if (sm != NULL)
-        SCFree(sm);
-    return -1;
 }
 
 /**
@@ -232,7 +213,7 @@ error:
  *
  * \param ptr pointer to DetectFtpdataData
  */
-static void DetectFtpdataFree(void *ptr) {
+static void DetectFtpdataFree(DetectEngineCtx *de_ctx, void *ptr) {
     DetectFtpdataData *ftpcommandd = (DetectFtpdataData *)ptr;
 
     /* do more specific cleanup here, if needed */
@@ -240,14 +221,14 @@ static void DetectFtpdataFree(void *ptr) {
     SCFree(ftpcommandd);
 }
 
-#if UNITTESTS
+#ifdef UNITTESTS
 
 static int DetectFtpdataParseTest01(void)
 {
     DetectFtpdataData *ftpcommandd = DetectFtpdataParse("stor");
     FAIL_IF_NULL(ftpcommandd);
     FAIL_IF(!(ftpcommandd->command == FTP_COMMAND_STOR));
-    DetectFtpdataFree(ftpcommandd);
+    DetectFtpdataFree(NULL, ftpcommandd);
     PASS;
 }
 
@@ -258,20 +239,22 @@ static int DetectFtpdataSignatureTest01(void)
 
     Signature *sig = DetectEngineAppendSig(de_ctx, "alert ip any any -> any any (ftpdata_command:stor; sid:1; rev:1;)");
     FAIL_IF_NULL(sig);
+    sig = DetectEngineAppendSig(de_ctx, "alert ip any any -> any any (ftpdata_command:retr; sid:2; rev:1;)");
+    FAIL_IF_NULL(sig);
+    sig = DetectEngineAppendSig(de_ctx, "alert ip any any -> any any (ftpdata_command:xxx; sid:3; rev:1;)");
+    FAIL_IF_NOT_NULL(sig);
 
     DetectEngineCtxFree(de_ctx);
     PASS;
 }
 
-#endif /* UNITTESTS */
-
 /**
  * \brief this function registers unit tests for DetectFtpdata
  */
-void DetectFtpdataRegisterTests(void) {
-#ifdef UNITTESTS
+static void DetectFtpdataRegisterTests(void)
+{
     UtRegisterTest("DetectFtpdataParseTest01", DetectFtpdataParseTest01);
     UtRegisterTest("DetectFtpdataSignatureTest01",
                    DetectFtpdataSignatureTest01);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

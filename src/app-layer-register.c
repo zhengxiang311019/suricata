@@ -1,4 +1,4 @@
-/* Copyright (C) 2017 Open Information Security Foundation
+/* Copyright (C) 2017-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -53,6 +53,10 @@ AppProto AppLayerRegisterProtocolDetection(const struct AppLayerParser *p, int e
     SCLogDebug("%s %s protocol detection enabled.", ip_proto_str, p->name);
 
     AppLayerProtoDetectRegisterProtocol(alproto, p->name);
+
+    if (p->ProbeTS == NULL && p->ProbeTC == NULL) {
+        return alproto;
+    }
 
     if (RunmodeIsUnittests()) {
 
@@ -125,17 +129,12 @@ int AppLayerRegisterParser(const struct AppLayerParser *p, AppProto alproto)
         p->StateGetTxCnt);
 
     /* Transaction handling. */
-    AppLayerParserRegisterGetStateProgressCompletionStatus(alproto,
-        p->StateGetProgressCompletionStatus);
+    AppLayerParserRegisterStateProgressCompletionStatus(alproto, p->complete_ts, p->complete_tc);
+
     AppLayerParserRegisterGetStateProgressFunc(p->ip_proto, alproto,
         p->StateGetProgress);
     AppLayerParserRegisterGetTx(p->ip_proto, alproto,
         p->StateGetTx);
-
-    if (p->StateGetTxLogged && p->StateSetTxLogged) {
-        AppLayerParserRegisterLoggerFuncs(p->ip_proto, alproto,
-                p->StateGetTxLogged, p->StateSetTxLogged);
-    }
 
     /* What is this being registered for? */
     AppLayerParserRegisterDetectStateFuncs(p->ip_proto, alproto,
@@ -145,6 +144,10 @@ int AppLayerRegisterParser(const struct AppLayerParser *p, AppProto alproto)
         AppLayerParserRegisterGetEventInfo(p->ip_proto, alproto,
                 p->StateGetEventInfo);
     }
+    if (p->StateGetEventInfoById) {
+        AppLayerParserRegisterGetEventInfoById(p->ip_proto, alproto,
+                p->StateGetEventInfoById);
+    }
     if (p->StateGetEvents) {
         AppLayerParserRegisterGetEventsFunc(p->ip_proto, alproto,
                 p->StateGetEvents);
@@ -152,10 +155,6 @@ int AppLayerRegisterParser(const struct AppLayerParser *p, AppProto alproto)
     if (p->LocalStorageAlloc && p->LocalStorageFree) {
         AppLayerParserRegisterLocalStorageFunc(p->ip_proto, alproto,
                 p->LocalStorageAlloc, p->LocalStorageFree);
-    }
-    if (p->GetTxMpmIDs && p->SetTxMpmIDs) {
-        AppLayerParserRegisterMpmIDsFuncs(p->ip_proto, alproto,
-                p->GetTxMpmIDs, p->SetTxMpmIDs);
     }
     if (p->StateGetFiles) {
         AppLayerParserRegisterGetFilesFunc(p->ip_proto, alproto,
@@ -165,6 +164,26 @@ int AppLayerRegisterParser(const struct AppLayerParser *p, AppProto alproto)
     if (p->GetTxIterator) {
         AppLayerParserRegisterGetTxIterator(p->ip_proto, alproto,
                 p->GetTxIterator);
+    }
+
+    if (p->GetTxData) {
+        AppLayerParserRegisterTxDataFunc(p->ip_proto, alproto,
+                p->GetTxData);
+    }
+
+    if (p->ApplyTxConfig) {
+        AppLayerParserRegisterApplyTxConfigFunc(p->ip_proto, alproto,
+                p->ApplyTxConfig);
+    }
+
+    if (p->flags) {
+        AppLayerParserRegisterOptionFlags(p->ip_proto, alproto,
+                p->flags);
+
+    }
+
+    if (p->Truncate) {
+        AppLayerParserRegisterTruncateFunc(p->ip_proto, alproto, p->Truncate);
     }
 
     return 0;

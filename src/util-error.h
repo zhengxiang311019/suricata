@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2014 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -176,9 +176,9 @@ typedef enum {
     SC_ERR_LIBNET_BUILD_FAILED,
     SC_ERR_LIBNET_WRITE_FAILED,
     SC_ERR_LIBNET_NOT_ENABLED,
-    SC_ERR_UNIFIED_LOG_FILE_HEADER,  /**< Error to indicate the unified file
-                                          header writing function has been
-                                          failed */
+    SC_ERR_UNIFIED_LOG_FILE_HEADER, /**< Error to indicate the unified file
+                                         header writing function has been
+                                         failed */
     SC_ERR_REFERENCE_UNKNOWN,       /**< unknown reference key (cve, url, etc) */
     SC_ERR_PIDFILE_SNPRINTF,
     SC_ERR_PIDFILE_OPEN,
@@ -199,13 +199,13 @@ typedef enum {
     SC_ERR_ERF_DAG_STREAM_READ_FAILED,
     SC_WARN_ERF_DAG_REC_LEN_CHANGED,
     SC_ERR_DAG_REQUIRED,
-    SC_ERR_DAG_NOSUPPORT,           /**< no ERF/DAG support compiled in */
+    SC_ERR_DAG_NOSUPPORT, /**< no ERF/DAG support compiled in */
     SC_ERR_FATAL,
     SC_ERR_DCERPC,
-    SC_ERR_DETECT_PREPARE,          /**< preparing the detection engine failed */
+    SC_ERR_DETECT_PREPARE, /**< preparing the detection engine failed */
     SC_ERR_AHO_CORASICK,
     SC_ERR_REFERENCE_CONFIG,
-    SC_ERR_DUPLICATE_SIG,       /**< Error to indicate that signature is duplicate */
+    SC_ERR_DUPLICATE_SIG, /**< Error to indicate that signature is duplicate */
     SC_WARN_PCAP_MULTI_DEV_EXPERIMENTAL,
     SC_ERR_PCAP_MULTI_DEV_NO_SUPPORT,
     SC_ERR_HTTP_METHOD_NEEDS_PRECEEDING_CONTENT,
@@ -228,9 +228,9 @@ typedef enum {
     SC_ERR_MAGIC_OPEN,
     SC_ERR_MAGIC_LOAD,
     SC_ERR_SIZE_PARSE,
-    SC_ERR_RAWBYTES_FILE_DATA,
+    SC_ERR_RAWBYTES_BUFFER,
     SC_ERR_SOCKET,
-    SC_ERR_PCAP_TRANSLATE,          /* failed to translate ip to dev */
+    SC_ERR_PCAP_TRANSLATE, /* failed to translate ip to dev */
     SC_WARN_OUTDATED_LIBHTP,
     SC_WARN_DEPRECATED,
     SC_WARN_PROFILE,
@@ -302,9 +302,9 @@ typedef enum {
     SC_ERR_INVALID_RULE_ARGUMENT, /**< Generic error code for invalid
                                    * rule argument. */
     SC_ERR_MT_NO_MAPPING,
-    SC_ERR_STATS_LOG_NEGATED, /** When totals and threads are both NO in yaml **/
-    SC_ERR_JSON_STATS_LOG_NEGATED, /** When totals and threads are both NO in yaml **/
-    SC_ERR_DEPRECATED_CONF, /**< Deprecated configuration parameter. */
+    SC_ERR_STATS_LOG_NEGATED,      /**< When totals and threads are both NO in yaml **/
+    SC_ERR_JSON_STATS_LOG_NEGATED, /**< When totals and threads are both NO in yaml **/
+    SC_ERR_DEPRECATED_CONF,        /**< Deprecated configuration parameter. */
     SC_WARN_FASTER_CAPTURE_AVAILABLE,
     SC_WARN_POOR_RULE,
     SC_ERR_ALERT_PAYLOAD_BUFFER,
@@ -347,8 +347,28 @@ typedef enum {
     SC_ERR_WINDIVERT_INVALID_FILTER,
     SC_ERR_WINDIVERT_TOOLONG_FILTER,
     SC_WARN_RUST_NOT_AVAILABLE,
+    SC_WARN_DEFAULT_WILL_CHANGE,
+    SC_WARN_EVE_MISSING_EVENTS,
+    SC_ERR_PLEDGE_FAILED,
+    SC_ERR_FTP_LOG_GENERIC,
+    SC_ERR_THASH_INIT,
+    SC_ERR_DATASET,
+    SC_WARN_ANOMALY_CONFIG,
+    SC_WARN_ALERT_CONFIG,
+    SC_ERR_PCRE_COPY_SUBSTRING,
+    SC_WARN_PCRE_JITSTACK,
+    SC_WARN_REGISTRATION_FAILED,
+    SC_ERR_ERF_BAD_RLEN,
+    SC_WARN_ERSPAN_CONFIG,
+    SC_WARN_HASSH_DISABLED,
+    SC_WARN_FILESTORE_CONFIG,
+    SC_WARN_PATH_READ_ERROR,
+    SC_ERR_HTTP2_LOG_GENERIC,
+    SC_ERR_PLUGIN,
+    SC_ERR_LOG_OUTPUT,
+    SC_ERR_RULE_INVALID_UTF8,
 
-    SC_ERR_MAX,
+    SC_ERR_MAX
 } SCError;
 
 const char *SCErrorToString(SCError);

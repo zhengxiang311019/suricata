@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -20,7 +20,7 @@
  *
  * \author Victor Julien <victor@inliniac.net>
  *
- * Implements the nocase keyword
+ * Implements the compress_whitespace transform keyword
  */
 
 #include "suricata-common.h"
@@ -35,30 +35,37 @@
 #include "util-print.h"
 
 static int DetectTransformCompressWhitespaceSetup (DetectEngineCtx *, Signature *, const char *);
+#ifdef UNITTESTS
 static void DetectTransformCompressWhitespaceRegisterTests(void);
-
-static void TransformCompressWhitespace(InspectionBuffer *buffer);
+#endif
+static void TransformCompressWhitespace(InspectionBuffer *buffer, void *options);
+static bool TransformCompressWhitespaceValidate(
+        const uint8_t *content, uint16_t content_len, void *options);
 
 void DetectTransformCompressWhitespaceRegister(void)
 {
     sigmatch_table[DETECT_TRANSFORM_COMPRESS_WHITESPACE].name = "compress_whitespace";
     sigmatch_table[DETECT_TRANSFORM_COMPRESS_WHITESPACE].desc =
-        "modify buffer to strip whitespace before inspection";
+        "modify buffer to compress consecutive whitespace characters "
+        "into a single one before inspection";
     sigmatch_table[DETECT_TRANSFORM_COMPRESS_WHITESPACE].url =
-        DOC_URL DOC_VERSION "/rules/transforms.html#compress_whitespace";
+        "/rules/transforms.html#compress-whitespace";
     sigmatch_table[DETECT_TRANSFORM_COMPRESS_WHITESPACE].Transform =
         TransformCompressWhitespace;
+    sigmatch_table[DETECT_TRANSFORM_COMPRESS_WHITESPACE].TransformValidate =
+            TransformCompressWhitespaceValidate;
     sigmatch_table[DETECT_TRANSFORM_COMPRESS_WHITESPACE].Setup =
         DetectTransformCompressWhitespaceSetup;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_TRANSFORM_COMPRESS_WHITESPACE].RegisterTests =
         DetectTransformCompressWhitespaceRegisterTests;
-
+#endif
     sigmatch_table[DETECT_TRANSFORM_COMPRESS_WHITESPACE].flags |= SIGMATCH_NOOPT;
 }
 
 /**
  *  \internal
- *  \brief Apply the nocase keyword to the last pattern match, either content or uricontent
+ *  \brief Apply the compress_whitespace keyword to the last pattern match
  *  \param det_ctx detection engine ctx
  *  \param s signature
  *  \param nullstr should be null
@@ -68,11 +75,35 @@ void DetectTransformCompressWhitespaceRegister(void)
 static int DetectTransformCompressWhitespaceSetup (DetectEngineCtx *de_ctx, Signature *s, const char *nullstr)
 {
     SCEnter();
-    int r = DetectSignatureAddTransform(s, DETECT_TRANSFORM_COMPRESS_WHITESPACE);
+    int r = DetectSignatureAddTransform(s, DETECT_TRANSFORM_COMPRESS_WHITESPACE, NULL);
     SCReturnInt(r);
 }
 
-static void TransformCompressWhitespace(InspectionBuffer *buffer)
+/*
+ *  \brief Validate content bytes to see if it's compatible with this transform
+ *  \param content Byte array to check for compatibility
+ *  \param content_len Number of bytes to check
+ *  \param options Ignored
+ *  \retval false If the string contains spaces
+ *  \retval true Otherwise.
+ */
+static bool TransformCompressWhitespaceValidate(
+        const uint8_t *content, uint16_t content_len, void *options)
+{
+    if (content) {
+        for (uint32_t i = 0; i < content_len; i++) {
+            if (!isspace(*content++)) {
+                continue;
+            }
+            if ((i + 1) < content_len && isspace(*content)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static void TransformCompressWhitespace(InspectionBuffer *buffer, void *options)
 {
     const uint8_t *input = buffer->inspect;
     const uint32_t input_len = buffer->inspect_len;
@@ -129,10 +160,10 @@ static int DetectTransformCompressWhitespaceTest01(void)
     uint32_t input_len = strlen((char *)input);
 
     InspectionBuffer buffer;
-    InspectionBufferInit(&buffer, 8);
+    InspectionBufferInit(&buffer, 9);
     InspectionBufferSetup(&buffer, input, input_len);
     PrintRawDataFp(stdout, buffer.inspect, buffer.inspect_len);
-    TransformCompressWhitespace(&buffer);
+    TransformCompressWhitespace(&buffer, NULL);
     PrintRawDataFp(stdout, buffer.inspect, buffer.inspect_len);
     InspectionBufferFree(&buffer);
     PASS;
@@ -144,14 +175,14 @@ static int DetectTransformCompressWhitespaceTest02(void)
     uint32_t input_len = strlen((char *)input);
 
     InspectionBuffer buffer;
-    InspectionBufferInit(&buffer, 8);
+    InspectionBufferInit(&buffer, 9);
     InspectionBufferSetup(&buffer, input, input_len);
     PrintRawDataFp(stdout, buffer.inspect, buffer.inspect_len);
     TransformDoubleWhitespace(&buffer);
     PrintRawDataFp(stdout, buffer.inspect, buffer.inspect_len);
     TransformDoubleWhitespace(&buffer);
     PrintRawDataFp(stdout, buffer.inspect, buffer.inspect_len);
-    TransformCompressWhitespace(&buffer);
+    TransformCompressWhitespace(&buffer, NULL);
     PrintRawDataFp(stdout, buffer.inspect, buffer.inspect_len);
     InspectionBufferFree(&buffer);
     PASS;
@@ -159,32 +190,40 @@ static int DetectTransformCompressWhitespaceTest02(void)
 
 static int DetectTransformCompressWhitespaceTest03(void)
 {
-    const char rule[] = "alert http any any -> any any (http_request_line; strip_whitespace; content:\"GET/HTTP\"; sid:1;)";
-    ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx = NULL;
-    memset(&th_v, 0, sizeof(th_v));
+    const uint8_t *input = (const uint8_t *)" A B C D  ";
+    uint32_t input_len = strlen((char *)input);
 
-    DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    FAIL_IF_NULL(de_ctx);
-    Signature *s = DetectEngineAppendSig(de_ctx, rule);
-    FAIL_IF_NULL(s);
-    SigGroupBuild(de_ctx);
-    DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
-    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
+    InspectionBuffer buffer;
+    InspectionBufferInit(&buffer, 10);
+    InspectionBufferSetup(&buffer, input, input_len);
+    PrintRawDataFp(stdout, buffer.inspect, buffer.inspect_len);
+    FAIL_IF(TransformCompressWhitespaceValidate(buffer.inspect, buffer.inspect_len, NULL));
     PASS;
 }
 
-#endif
+static int DetectTransformCompressWhitespaceTest04(void)
+{
+    const uint8_t *input = (const uint8_t *)" A B C D ";
+    uint32_t input_len = strlen((char *)input);
+
+    InspectionBuffer buffer;
+    InspectionBufferInit(&buffer, 9);
+    InspectionBufferSetup(&buffer, input, input_len);
+    TransformDoubleWhitespace(&buffer);
+    PrintRawDataFp(stdout, buffer.inspect, buffer.inspect_len);
+    FAIL_IF(TransformCompressWhitespaceValidate(buffer.inspect, buffer.inspect_len, NULL));
+    PASS;
+}
 
 static void DetectTransformCompressWhitespaceRegisterTests(void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("DetectTransformCompressWhitespaceTest01",
             DetectTransformCompressWhitespaceTest01);
     UtRegisterTest("DetectTransformCompressWhitespaceTest02",
             DetectTransformCompressWhitespaceTest02);
-    UtRegisterTest("DetectTransformCompressWhitespaceTest03",
-            DetectTransformCompressWhitespaceTest03);
-#endif
+    UtRegisterTest(
+            "DetectTransformCompressWhitespaceTest03", DetectTransformCompressWhitespaceTest03);
+    UtRegisterTest(
+            "DetectTransformCompressWhitespaceTest04", DetectTransformCompressWhitespaceTest04);
 }
+#endif

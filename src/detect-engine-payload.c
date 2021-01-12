@@ -165,9 +165,10 @@ int DetectEngineInspectPacketPayload(DetectEngineCtx *de_ctx,
     det_ctx->inspection_recursion_counter = 0;
     det_ctx->replist = NULL;
 
-    r = DetectEngineContentInspection(de_ctx, det_ctx, s, s->sm_arrays[DETECT_SM_LIST_PMATCH],
-                                      f, p->payload, p->payload_len, 0, DETECT_CI_FLAGS_SINGLE,
-                                      DETECT_ENGINE_CONTENT_INSPECTION_MODE_PAYLOAD, p);
+    r = DetectEngineContentInspection(de_ctx, det_ctx,
+            s, s->sm_arrays[DETECT_SM_LIST_PMATCH],
+            p, f, p->payload, p->payload_len, 0,
+            DETECT_CI_FLAGS_SINGLE, DETECT_ENGINE_CONTENT_INSPECTION_MODE_PAYLOAD);
     if (r == 1) {
         SCReturnInt(1);
     }
@@ -208,8 +209,8 @@ static int DetectEngineInspectStreamUDPPayload(DetectEngineCtx *de_ctx,
     det_ctx->replist = NULL;
 
     r = DetectEngineContentInspection(de_ctx, det_ctx, s, smd,
-            f, p->payload, p->payload_len, 0, DETECT_CI_FLAGS_SINGLE,
-            DETECT_ENGINE_CONTENT_INSPECTION_MODE_PAYLOAD, p);
+            p, f, p->payload, p->payload_len, 0, DETECT_CI_FLAGS_SINGLE,
+            DETECT_ENGINE_CONTENT_INSPECTION_MODE_PAYLOAD);
     if (r == 1) {
         SCReturnInt(1);
     }
@@ -238,8 +239,8 @@ static int StreamContentInspectFunc(void *cb_data, const uint8_t *data, const ui
 
     r = DetectEngineContentInspection(smd->de_ctx, smd->det_ctx,
             smd->s, smd->s->sm_arrays[DETECT_SM_LIST_PMATCH],
-            smd->f, (uint8_t *)data, data_len, 0, 0, //TODO
-            DETECT_ENGINE_CONTENT_INSPECTION_MODE_STREAM, NULL);
+            NULL, smd->f, (uint8_t *)data, data_len, 0, 0, //TODO
+            DETECT_ENGINE_CONTENT_INSPECTION_MODE_STREAM);
     if (r == 1) {
         SCReturnInt(1);
     }
@@ -264,7 +265,7 @@ int DetectEngineInspectStreamPayload(DetectEngineCtx *de_ctx,
         Flow *f, Packet *p)
 {
     SCEnter();
-
+    SCLogDebug("FLUSH? %s", (s->flags & SIG_FLAG_FLUSH)?"true":"false");
     uint64_t unused;
     struct StreamContentInspectData inspect_data = { de_ctx, det_ctx, s, f };
     int r = StreamReassembleRaw(f->protoctx, p,
@@ -296,8 +297,8 @@ static int StreamContentInspectEngineFunc(void *cb_data, const uint8_t *data, co
 
     r = DetectEngineContentInspection(smd->de_ctx, smd->det_ctx,
             smd->s, smd->smd,
-            smd->f, (uint8_t *)data, data_len, 0, 0, // TODO
-            DETECT_ENGINE_CONTENT_INSPECTION_MODE_STREAM, NULL);
+            NULL, smd->f, (uint8_t *)data, data_len, 0, 0, // TODO
+            DETECT_ENGINE_CONTENT_INSPECTION_MODE_STREAM);
     if (r == 1) {
         SCReturnInt(1);
     }
@@ -313,19 +314,17 @@ static int StreamContentInspectEngineFunc(void *cb_data, const uint8_t *data, co
  *
  *  Returns "can't match" if depth is reached.
  */
-int DetectEngineInspectStream(ThreadVars *tv,
-        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const Signature *s, const SigMatchData *smd,
-        Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
+int DetectEngineInspectStream(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
+        const struct DetectEngineAppInspectionEngine_ *engine, const Signature *s, Flow *f,
+        uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
 {
     Packet *p = det_ctx->p; /* TODO: get rid of this HACK */
 
     /* in certain sigs, e.g. 'alert dns', which apply to both tcp and udp
      * we can get called for UDP. Then we simply inspect the packet payload */
     if (p->proto == IPPROTO_UDP) {
-        return DetectEngineInspectStreamUDPPayload(de_ctx,
-                det_ctx, s, smd, f, p);
-    /* for other non-TCP protocols we assume match */
+        return DetectEngineInspectStreamUDPPayload(de_ctx, det_ctx, s, engine->smd, f, p);
+        /* for other non-TCP protocols we assume match */
     } else if (p->proto != IPPROTO_TCP)
         return DETECT_ENGINE_INSPECT_SIG_MATCH;
 
@@ -333,10 +332,11 @@ int DetectEngineInspectStream(ThreadVars *tv,
     if (ssn == NULL)
         return DETECT_ENGINE_INSPECT_SIG_CANT_MATCH;
 
-    SCLogDebug("pre-inspect det_ctx->raw_stream_progress %"PRIu64,
-            det_ctx->raw_stream_progress);
+    SCLogDebug("pre-inspect det_ctx->raw_stream_progress %"PRIu64" FLUSH? %s",
+            det_ctx->raw_stream_progress,
+            (s->flags & SIG_FLAG_FLUSH)?"true":"false");
     uint64_t unused;
-    struct StreamContentInspectEngineData inspect_data = { de_ctx, det_ctx, s, smd, f };
+    struct StreamContentInspectEngineData inspect_data = { de_ctx, det_ctx, s, engine->smd, f };
     int match = StreamReassembleRaw(f->protoctx, p,
             StreamContentInspectEngineFunc, &inspect_data,
             &unused, ((s->flags & SIG_FLAG_FLUSH) != 0));

@@ -26,13 +26,12 @@
 
 #ifndef OS_WIN32
 
-#include <grp.h>
-#include <pwd.h>
 #include "suricata-common.h"
 #include "util-debug.h"
 #include "suricata.h"
 
 #include "util-privs.h"
+#include "util-byte.h"
 
 #ifdef HAVE_LIBCAP_NG
 
@@ -74,9 +73,10 @@ void SCDropMainThreadCaps(uint32_t userid, uint32_t groupid)
                     CAP_NET_ADMIN, CAP_NET_RAW, CAP_SYS_NICE,
                     -1);
             break;
+        case RUNMODE_NFLOG:
         case RUNMODE_NFQ:
             capng_updatev(CAPNG_ADD, CAPNG_EFFECTIVE|CAPNG_PERMITTED,
-                    CAP_NET_ADMIN,          /* needed for nfqueue inline mode */
+                    CAP_NET_ADMIN,          /* needed for nflog and nfqueue inline mode */
                     CAP_SYS_NICE,
                     -1);
             break;
@@ -85,9 +85,8 @@ void SCDropMainThreadCaps(uint32_t userid, uint32_t groupid)
     if (capng_change_id(userid, groupid, CAPNG_DROP_SUPP_GRP |
             CAPNG_CLEAR_BOUNDING) < 0)
     {
-        SCLogError(SC_ERR_CHANGING_CAPS_FAILED, "capng_change_id for main thread"
-                " failed");
-        exit(EXIT_FAILURE);
+        FatalError(SC_ERR_FATAL, "capng_change_id for main thread"
+                   " failed");
     }
 
     SCLogInfo("dropped the caps for main thread");
@@ -155,19 +154,19 @@ int SCGetUserID(const char *user_name, const char *group_name, uint32_t *uid, ui
 
     /* Get the user ID */
     if (isdigit((unsigned char)user_name[0]) != 0) {
-        userid = atoi(user_name);
+        if (ByteExtractStringUint32(&userid, 10, 0, (const char *)user_name) < 0) {
+            FatalError(SC_ERR_UID_FAILED, "invalid user id value: '%s'", user_name);
+        }
         pw = getpwuid(userid);
        if (pw == NULL) {
-            SCLogError(SC_ERR_UID_FAILED, "unable to get the user ID, "
-                    "check if user exist!!");
-            exit(EXIT_FAILURE);
+            FatalError(SC_ERR_FATAL, "unable to get the user ID, "
+                       "check if user exist!!");
         }
     } else {
         pw = getpwnam(user_name);
         if (pw == NULL) {
-            SCLogError(SC_ERR_UID_FAILED, "unable to get the user ID, "
-                    "check if user exist!!");
-            exit(EXIT_FAILURE);
+            FatalError(SC_ERR_FATAL, "unable to get the user ID, "
+                       "check if user exist!!");
         }
         userid = pw->pw_uid;
     }
@@ -177,13 +176,14 @@ int SCGetUserID(const char *user_name, const char *group_name, uint32_t *uid, ui
         struct group *gp;
 
         if (isdigit((unsigned char)group_name[0]) != 0) {
-            groupid = atoi(group_name);
+            if (ByteExtractStringUint32(&groupid, 10, 0, (const char *)group_name) < 0) {
+                FatalError(SC_ERR_GID_FAILED, "invalid group id: '%s'", group_name);
+            }
         } else {
             gp = getgrnam(group_name);
             if (gp == NULL) {
-                SCLogError(SC_ERR_GID_FAILED, "unable to get the group"
-                        " ID, check if group exist!!");
-                exit(EXIT_FAILURE);
+                FatalError(SC_ERR_FATAL, "unable to get the group"
+                           " ID, check if group exist!!");
             }
             groupid = gp->gr_gid;
         }
@@ -217,13 +217,14 @@ int SCGetGroupID(const char *group_name, uint32_t *gid)
 
     /* Get the group ID */
     if (isdigit((unsigned char)group_name[0]) != 0) {
-        grpid = atoi(group_name);
+        if (ByteExtractStringUint32(&grpid, 10, 0, (const char *)group_name) < 0) {
+            FatalError(SC_ERR_GID_FAILED, "invalid group id: '%s'", group_name);
+        }
     } else {
         gp = getgrnam(group_name);
         if (gp == NULL) {
-            SCLogError(SC_ERR_GID_FAILED, "unable to get the group ID,"
-                    " check if group exist!!");
-            exit(EXIT_FAILURE);
+            FatalError(SC_ERR_FATAL, "unable to get the group ID,"
+                       " check if group exist!!");
         }
         grpid = gp->gr_gid;
     }
@@ -235,4 +236,19 @@ int SCGetGroupID(const char *group_name, uint32_t *gid)
 
     return 0;
 }
+
+#ifdef __OpenBSD__
+int SCPledge(void)
+{
+    int ret = pledge("stdio rpath wpath cpath fattr unix dns bpf", NULL);
+
+    if (ret != 0) {
+        SCLogError(SC_ERR_PLEDGE_FAILED, "unable to pledge,"
+                " check permissions!! ret=%i errno=%i", ret, errno);
+        exit(EXIT_FAILURE);
+    }
+
+    return 0;
+}
+#endif /* __OpenBSD__ */
 #endif /* OS_WIN32 */

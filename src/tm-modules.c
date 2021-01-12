@@ -30,6 +30,8 @@
 #include "threads.h"
 #include "util-logopenfile.h"
 
+TmModule tmm_modules[TMM_SIZE];
+
 void TmModuleDebugList(void)
 {
     TmModule *t;
@@ -211,6 +213,8 @@ const char * TmModuleTmmIdToString(TmmId id)
         CASE_CODE (TMM_DECODEPCAPFILE);
         CASE_CODE (TMM_RECEIVEPFRING);
         CASE_CODE (TMM_DECODEPFRING);
+        CASE_CODE (TMM_RECEIVEPLUGIN);
+        CASE_CODE (TMM_DECODEPLUGIN);
         CASE_CODE (TMM_RESPONDREJECT);
         CASE_CODE (TMM_DECODEIPFW);
         CASE_CODE (TMM_VERDICTIPFW);
@@ -219,8 +223,6 @@ const char * TmModuleTmmIdToString(TmmId id)
         CASE_CODE (TMM_DECODEERFFILE);
         CASE_CODE (TMM_RECEIVEERFDAG);
         CASE_CODE (TMM_DECODEERFDAG);
-        CASE_CODE (TMM_RECEIVEMPIPE);
-        CASE_CODE (TMM_DECODEMPIPE);
         CASE_CODE (TMM_RECEIVENAPATECH);
         CASE_CODE (TMM_DECODENAPATECH);
         CASE_CODE (TMM_RECEIVEAFP);

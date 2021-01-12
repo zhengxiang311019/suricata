@@ -54,76 +54,12 @@
 #define MAX_PENDING_RETURN_PACKETS 32
 static uint32_t max_pending_return_packets = MAX_PENDING_RETURN_PACKETS;
 
-#ifdef TLS
-__thread PktPool thread_pkt_pool;
+thread_local PktPool thread_pkt_pool;
 
 static inline PktPool *GetThreadPacketPool(void)
 {
     return &thread_pkt_pool;
 }
-#else
-/* __thread not supported. */
-static pthread_key_t pkt_pool_thread_key;
-static SCMutex pkt_pool_thread_key_mutex = SCMUTEX_INITIALIZER;
-static int pkt_pool_thread_key_initialized = 0;
-
-static void PktPoolThreadDestroy(void * buf)
-{
-    SCFreeAligned(buf);
-}
-
-static void TmqhPacketPoolInit(void)
-{
-    SCMutexLock(&pkt_pool_thread_key_mutex);
-    if (pkt_pool_thread_key_initialized) {
-        /* Key has already been created. */
-        SCMutexUnlock(&pkt_pool_thread_key_mutex);
-        return;
-    }
-
-    /* Create the pthread Key that is used to look up thread specific
-     * data buffer. Needs to be created only once.
-     */
-    int r = pthread_key_create(&pkt_pool_thread_key, PktPoolThreadDestroy);
-    if (r != 0) {
-        SCLogError(SC_ERR_MEM_ALLOC, "pthread_key_create failed with %d", r);
-        exit(EXIT_FAILURE);
-    }
-
-    pkt_pool_thread_key_initialized = 1;
-    SCMutexUnlock(&pkt_pool_thread_key_mutex);
-}
-
-static PktPool *ThreadPacketPoolCreate(void)
-{
-    TmqhPacketPoolInit();
-
-    /* Create a new pool for this thread. */
-    PktPool* pool = (PktPool*)SCMallocAligned(sizeof(PktPool), CLS);
-    if (pool == NULL) {
-        SCLogError(SC_ERR_MEM_ALLOC, "malloc failed");
-        exit(EXIT_FAILURE);
-    }
-    memset(pool,0x0,sizeof(*pool));
-
-    int r = pthread_setspecific(pkt_pool_thread_key, pool);
-    if (r != 0) {
-        SCLogError(SC_ERR_MEM_ALLOC, "pthread_setspecific failed with %d", r);
-        exit(EXIT_FAILURE);
-    }
-
-    return pool;
-}
-
-static inline PktPool *GetThreadPacketPool(void)
-{
-    PktPool* pool = (PktPool*)pthread_getspecific(pkt_pool_thread_key);
-    if (pool == NULL)
-        pool = ThreadPacketPoolCreate();
-
-    return pool;
-}
-#endif
 
 /**
  * \brief TmqhPacketpoolRegister
@@ -168,37 +104,42 @@ void PacketPoolWait(void)
  *
  *  This function only returns when at least N packets are in our pool.
  *
+ *  If counting in our pool's main stack didn't give us the number we
+ *  are seeking, we check if the return stack is filled and add those
+ *  to our main stack. Then we retry.
+ *
  *  \param n number of packets needed
  */
 void PacketPoolWaitForN(int n)
 {
     PktPool *my_pool = GetThreadPacketPool();
-    Packet *p = NULL;
+    Packet *p, *pp;
 
     while (1) {
-        int i = 0;
         PacketPoolWait();
 
         /* count packets in our stack */
-        p = my_pool->head;
+        int i = 0;
+        pp = p = my_pool->head;
         while (p != NULL) {
             if (++i == n)
                 return;
 
+            pp = p;
             p = p->next;
         }
 
-        /* continue counting in the return stack */
+        /* check return stack, return to our pool and retry counting */
         if (my_pool->return_stack.head != NULL) {
             SCMutexLock(&my_pool->return_stack.mutex);
-            p = my_pool->return_stack.head;
-            while (p != NULL) {
-                if (++i == n) {
-                    SCMutexUnlock(&my_pool->return_stack.mutex);
-                    return;
-                }
-                p = p->next;
+            /* Move all the packets from the locked return stack to the local stack. */
+            if (pp) {
+                pp->next = my_pool->return_stack.head;
+            } else {
+                my_pool->head = my_pool->return_stack.head;
             }
+            my_pool->return_stack.head = NULL;
+            SC_ATOMIC_RESET(my_pool->return_stack.sync_now);
             SCMutexUnlock(&my_pool->return_stack.mutex);
 
         /* or signal that we need packets and wait */
@@ -345,10 +286,6 @@ void PacketPoolReturnPacket(Packet *p)
 
 void PacketPoolInitEmpty(void)
 {
-#ifndef TLS
-    TmqhPacketPoolInit();
-#endif
-
     PktPool *my_pool = GetThreadPacketPool();
 
 #ifdef DEBUG_VALIDATION
@@ -365,10 +302,6 @@ void PacketPoolInitEmpty(void)
 void PacketPoolInit(void)
 {
     extern intmax_t max_pending_packets;
-
-#ifndef TLS
-    TmqhPacketPoolInit();
-#endif
 
     PktPool *my_pool = GetThreadPacketPool();
 
@@ -389,8 +322,8 @@ void PacketPoolInit(void)
     for (i = 0; i < max_pending_packets; i++) {
         Packet *p = PacketGetFromAlloc();
         if (unlikely(p == NULL)) {
-            SCLogError(SC_ERR_FATAL, "Fatal error encountered while allocating a packet. Exiting...");
-            exit(EXIT_FAILURE);
+            FatalError(SC_ERR_FATAL,
+                       "Fatal error encountered while allocating a packet. Exiting...");
         }
         PacketPoolStorePacket(p);
     }
@@ -427,8 +360,6 @@ void PacketPoolDestroy(void)
     while ((p = PacketPoolGetPacket()) != NULL) {
         PacketFree(p);
     }
-
-    SC_ATOMIC_DESTROY(my_pool->return_stack.sync_now);
 
 #ifdef DEBUG_VALIDATION
     my_pool->initialized = 0;
@@ -559,6 +490,12 @@ void TmqhReleasePacketsToPacketPool(PacketQueue *pq)
     return;
 }
 
+/** number of packets to keep reserved when calculating the the pending
+ *  return packets count. This assumes we need at max 10 packets in one
+ *  PacketPoolWaitForN call. The actual number is 9 now, so this has a
+ *  bit of margin. */
+#define RESERVED_PACKETS 10
+
 /**
  *  \brief Set the max_pending_return_packets value
  *
@@ -575,17 +512,23 @@ void TmqhReleasePacketsToPacketPool(PacketQueue *pq)
 void PacketPoolPostRunmodes(void)
 {
     extern intmax_t max_pending_packets;
-
+    intmax_t pending_packets = max_pending_packets;
+    if (pending_packets < RESERVED_PACKETS) {
+        FatalError(SC_ERR_INVALID_ARGUMENT, "'max-pending-packets' setting "
+                "must be at least %d", RESERVED_PACKETS);
+    }
     uint32_t threads = TmThreadCountThreadsByTmmFlags(TM_FLAG_DETECT_TM);
     if (threads == 0)
         return;
-    if (threads > max_pending_packets)
-        return;
 
-    uint32_t packets = (max_pending_packets / threads) - 1;
+    uint32_t packets = (pending_packets / threads) - 1;
     if (packets < max_pending_return_packets)
         max_pending_return_packets = packets;
 
+    /* make sure to have a margin in the return logic */
+    if (max_pending_return_packets >= RESERVED_PACKETS)
+        max_pending_return_packets -= RESERVED_PACKETS;
+
     SCLogDebug("detect threads %u, max packets %u, max_pending_return_packets %u",
-            threads, threads, max_pending_return_packets);
+            threads, packets, max_pending_return_packets);
 }

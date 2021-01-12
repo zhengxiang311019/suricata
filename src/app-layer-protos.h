@@ -33,10 +33,8 @@ enum AppProtoEnum {
     ALPROTO_TLS, /* SSLv2, SSLv3 & TLSv1 */
     ALPROTO_SSH,
     ALPROTO_IMAP,
-    ALPROTO_MSN,
     ALPROTO_JABBER,
     ALPROTO_SMB,
-    ALPROTO_SMB2,
     ALPROTO_DCERPC,
     ALPROTO_IRC,
 
@@ -51,8 +49,14 @@ enum AppProtoEnum {
     ALPROTO_IKEV2,
     ALPROTO_KRB5,
     ALPROTO_DHCP,
+    ALPROTO_SNMP,
+    ALPROTO_SIP,
+    ALPROTO_RFB,
+    ALPROTO_MQTT,
     ALPROTO_TEMPLATE,
     ALPROTO_TEMPLATE_RUST,
+    ALPROTO_RDP,
+    ALPROTO_HTTP2,
 
     /* used by the probing parser when alproto detection fails
      * permanently for that particular stream */
@@ -67,6 +71,11 @@ enum AppProtoEnum {
 
 /* not using the enum as that is a unsigned int, so 4 bytes */
 typedef uint16_t AppProto;
+
+static inline bool AppProtoIsValid(AppProto a)
+{
+    return ((a > ALPROTO_UNKNOWN && a < ALPROTO_FAILED));
+}
 
 /**
  * \brief Maps the ALPROTO_*, to its string equivalent.

@@ -1,4 +1,4 @@
-/* Copyright (C) 2012 Open Information Security Foundation
+/* Copyright (C) 2012-2020 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -41,6 +41,7 @@
 #include "detect-engine-state.h"
 
 #include "util-debug.h"
+#include "util-byte.h"
 #include "util-unittest.h"
 #include "util-unittest-helper.h"
 #include "util-fmemopen.h"
@@ -49,26 +50,31 @@
 #include "host.h"
 
 #define PARSE_REGEX         "\\s*(any|src|dst|both)\\s*,\\s*([A-Za-z0-9\\-\\_]+)\\s*,\\s*(\\<|\\>|\\=)\\s*,\\s*([0-9]+)\\s*"
-static pcre *parse_regex;
-static pcre_extra *parse_regex_study;
+static DetectParseRegex parse_regex;
 
-static int DetectIPRepMatch (ThreadVars *, DetectEngineThreadCtx *, Packet *,
+static int DetectIPRepMatch (DetectEngineThreadCtx *, Packet *,
         const Signature *, const SigMatchCtx *);
 static int DetectIPRepSetup (DetectEngineCtx *, Signature *, const char *);
-void DetectIPRepFree (void *);
-void IPRepRegisterTests(void);
+void DetectIPRepFree (DetectEngineCtx *, void *);
+#ifdef UNITTESTS
+static void IPRepRegisterTests(void);
+#endif
 
 void DetectIPRepRegister (void)
 {
     sigmatch_table[DETECT_IPREP].name = "iprep";
+    sigmatch_table[DETECT_IPREP].desc = "match on the IP reputation information for a host";
+    sigmatch_table[DETECT_IPREP].url = "/rules/ip-reputation-rules.html#iprep";
     sigmatch_table[DETECT_IPREP].Match = DetectIPRepMatch;
     sigmatch_table[DETECT_IPREP].Setup = DetectIPRepSetup;
     sigmatch_table[DETECT_IPREP].Free  = DetectIPRepFree;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_IPREP].RegisterTests = IPRepRegisterTests;
+#endif
     /* this is compatible to ip-only signatures */
     sigmatch_table[DETECT_IPREP].flags |= SIGMATCH_IPONLY_COMPAT;
 
-    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex, &parse_regex_study);
+    DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
 static uint8_t GetHostRepSrc(Packet *p, uint8_t cat, uint32_t version)
@@ -167,7 +173,7 @@ static inline int RepMatch(uint8_t op, uint8_t val1, uint8_t val2)
  *         1: match
  *        -1: error
  */
-static int DetectIPRepMatch (ThreadVars *t, DetectEngineThreadCtx *det_ctx, Packet *p,
+static int DetectIPRepMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
         const Signature *s, const SigMatchCtx *ctx)
 {
     const DetectIPRepData *rd = (const DetectIPRepData *)ctx;
@@ -239,11 +245,10 @@ int DetectIPRepSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawstr)
     SigMatch *sm = NULL;
     char *cmd_str = NULL, *name = NULL, *op_str = NULL, *value = NULL;
     uint8_t cmd = 0;
-#define MAX_SUBSTRINGS 30
     int ret = 0, res = 0;
     int ov[MAX_SUBSTRINGS];
 
-    ret = pcre_exec(parse_regex, parse_regex_study, rawstr, strlen(rawstr), 0, 0, ov, MAX_SUBSTRINGS);
+    ret = DetectParsePcreExec(&parse_regex, rawstr, 0, 0, ov, MAX_SUBSTRINGS);
     if (ret != 5) {
         SCLogError(SC_ERR_PCRE_MATCH, "\"%s\" is not a valid setting for iprep", rawstr);
         return -1;
@@ -321,10 +326,8 @@ int DetectIPRepSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawstr)
     }
 
     if (value != NULL && strlen(value) > 0) {
-        int ival = atoi(value);
-        if (ival < 0 || ival > 127)
+        if (StringParseU8RangeCheck(&val, 10, 0, (const char *)value, 0, 127) < 0)
             goto error;
-        val = (uint8_t)ival;
     }
 
     cd = SCMalloc(sizeof(DetectIPRepData));
@@ -341,6 +344,10 @@ int DetectIPRepSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawstr)
     name = NULL;
     pcre_free_substring(cmd_str);
     cmd_str = NULL;
+    pcre_free_substring(op_str);
+    op_str = NULL;
+    pcre_free_substring(value);
+    value = NULL;
 
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
@@ -360,6 +367,10 @@ error:
         pcre_free_substring(name);
     if (cmd_str != NULL)
         pcre_free_substring(cmd_str);
+    if (op_str != NULL)
+        pcre_free_substring(op_str);
+    if (value != NULL)
+        pcre_free_substring(value);
     if (cd != NULL)
         SCFree(cd);
     if (sm != NULL)
@@ -367,7 +378,7 @@ error:
     return -1;
 }
 
-void DetectIPRepFree (void *ptr)
+void DetectIPRepFree (DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectIPRepData *fd = (DetectIPRepData *)ptr;
 
@@ -990,14 +1001,12 @@ end:
     HostShutdown();
     return result;
 }
-#endif /* UNITTESTS */
 
 /**
  * \brief this function registers unit tests for IPRep
  */
 void IPRepRegisterTests(void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("DetectIPRepTest01", DetectIPRepTest01);
     UtRegisterTest("DetectIPRepTest02", DetectIPRepTest02);
     UtRegisterTest("DetectIPRepTest03", DetectIPRepTest03);
@@ -1007,5 +1016,5 @@ void IPRepRegisterTests(void)
     UtRegisterTest("DetectIPRepTest07", DetectIPRepTest07);
     UtRegisterTest("DetectIPRepTest08", DetectIPRepTest08);
     UtRegisterTest("DetectIPRepTest09", DetectIPRepTest09);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */

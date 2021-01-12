@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2019 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -32,6 +32,7 @@
 #include "detect-parse.h"
 #include "detect-content.h"
 #include "detect-uricontent.h"
+#include "detect-byte.h"
 #include "detect-byte-extract.h"
 #include "detect-offset.h"
 
@@ -46,11 +47,8 @@ void DetectOffsetRegister (void)
 {
     sigmatch_table[DETECT_OFFSET].name = "offset";
     sigmatch_table[DETECT_OFFSET].desc = "designate from which byte in the payload will be checked to find a match";
-    sigmatch_table[DETECT_OFFSET].url = DOC_URL DOC_VERSION "/rules/payload-keywords.html#offset";
-    sigmatch_table[DETECT_OFFSET].Match = NULL;
+    sigmatch_table[DETECT_OFFSET].url = "/rules/payload-keywords.html#offset";
     sigmatch_table[DETECT_OFFSET].Setup = DetectOffsetSetup;
-    sigmatch_table[DETECT_OFFSET].Free  = NULL;
-    sigmatch_table[DETECT_OFFSET].RegisterTests = NULL;
 }
 
 int DetectOffsetSetup (DetectEngineCtx *de_ctx, Signature *s, const char *offsetstr)
@@ -63,7 +61,7 @@ int DetectOffsetSetup (DetectEngineCtx *de_ctx, Signature *s, const char *offset
     pm = DetectGetLastSMFromLists(s, DETECT_CONTENT, -1);
     if (pm == NULL) {
         SCLogError(SC_ERR_OFFSET_MISSING_CONTENT, "offset needs "
-                   "preceding content option");
+                   "preceding content option.");
         goto end;
     }
 
@@ -71,11 +69,11 @@ int DetectOffsetSetup (DetectEngineCtx *de_ctx, Signature *s, const char *offset
     DetectContentData *cd = (DetectContentData *)pm->ctx;
 
     if (cd->flags & DETECT_CONTENT_STARTS_WITH) {
-        SCLogError(SC_ERR_INVALID_SIGNATURE, "can't use offset with startswith");
+        SCLogError(SC_ERR_INVALID_SIGNATURE, "can't use offset with startswith.");
         goto end;
     }
     if (cd->flags & DETECT_CONTENT_OFFSET) {
-        SCLogError(SC_ERR_INVALID_SIGNATURE, "can't use multiple offsets for the same content. ");
+        SCLogError(SC_ERR_INVALID_SIGNATURE, "can't use multiple offsets for the same content.");
         goto end;
     }
     if ((cd->flags & DETECT_CONTENT_WITHIN) || (cd->flags & DETECT_CONTENT_DISTANCE)) {
@@ -87,28 +85,27 @@ int DetectOffsetSetup (DetectEngineCtx *de_ctx, Signature *s, const char *offset
     }
     if (cd->flags & DETECT_CONTENT_NEGATED && cd->flags & DETECT_CONTENT_FAST_PATTERN) {
         SCLogError(SC_ERR_INVALID_SIGNATURE, "can't have a relative "
-                   "negated keyword set along with a fast_pattern");
+                   "negated keyword set along with 'fast_pattern'.");
         goto end;
     }
     if (cd->flags & DETECT_CONTENT_FAST_PATTERN_ONLY) {
         SCLogError(SC_ERR_INVALID_SIGNATURE, "can't have a relative "
-                   "keyword set along with a fast_pattern:only;");
+                   "keyword set along with 'fast_pattern:only;'.");
         goto end;
     }
     if (str[0] != '-' && isalpha((unsigned char)str[0])) {
-        SigMatch *bed_sm =
-            DetectByteExtractRetrieveSMVar(str, s);
-        if (bed_sm == NULL) {
-            SCLogError(SC_ERR_INVALID_SIGNATURE, "unknown byte_extract var "
-                       "seen in offset - %s\n", str);
+        DetectByteIndexType index;
+        if (!DetectByteRetrieveSMVar(str, s, &index)) {
+            SCLogError(SC_ERR_INVALID_SIGNATURE, "unknown byte_ keyword var "
+                       "seen in offset - %s.", str);
             goto end;
         }
-        cd->offset = ((DetectByteExtractData *)bed_sm->ctx)->local_id;
-        cd->flags |= DETECT_CONTENT_OFFSET_BE;
+        cd->offset = index;
+        cd->flags |= DETECT_CONTENT_OFFSET_VAR;
     } else {
-        if (ByteExtractStringUint16(&cd->offset, 0, 0, str) != (int)strlen(str))
+        if (StringParseUint16(&cd->offset, 0, 0, str) < 0)
         {
-            SCLogError(SC_ERR_INVALID_SIGNATURE, "invalid value for offset: %s", str);
+            SCLogError(SC_ERR_INVALID_SIGNATURE, "invalid value for offset: %s.", str);
             goto end;
         }
         if (cd->depth != 0) {

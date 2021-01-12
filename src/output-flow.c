@@ -27,6 +27,7 @@
 #include "tm-modules.h"
 #include "output-flow.h"
 #include "util-profiling.h"
+#include "util-validate.h"
 
 typedef struct OutputLoggerThreadStore_ {
     void *thread_data;
@@ -89,23 +90,25 @@ int OutputRegisterFlowLogger(const char *name, FlowLogger LogFunc,
  */
 TmEcode OutputFlowLog(ThreadVars *tv, void *thread_data, Flow *f)
 {
-    BUG_ON(thread_data == NULL);
+    DEBUG_VALIDATE_BUG_ON(thread_data == NULL);
 
     if (list == NULL)
         return TM_ECODE_OK;
+
+    FlowSetEndFlags(f);
 
     OutputLoggerThreadData *op_thread_data = (OutputLoggerThreadData *)thread_data;
     OutputFlowLogger *logger = list;
     OutputLoggerThreadStore *store = op_thread_data->store;
 
-    BUG_ON(logger == NULL && store != NULL);
-    BUG_ON(logger != NULL && store == NULL);
-    BUG_ON(logger == NULL && store == NULL);
+    DEBUG_VALIDATE_BUG_ON(logger == NULL && store != NULL);
+    DEBUG_VALIDATE_BUG_ON(logger != NULL && store == NULL);
+    DEBUG_VALIDATE_BUG_ON(logger == NULL && store == NULL);
 
     logger = list;
     store = op_thread_data->store;
     while (logger && store) {
-        BUG_ON(logger->LogFunc == NULL);
+        DEBUG_VALIDATE_BUG_ON(logger->LogFunc == NULL);
 
         SCLogDebug("logger %p", logger);
         //PACKET_PROFILING_LOGGER_START(p, logger->module_id);
@@ -115,8 +118,8 @@ TmEcode OutputFlowLog(ThreadVars *tv, void *thread_data, Flow *f)
         logger = logger->next;
         store = store->next;
 
-        BUG_ON(logger == NULL && store != NULL);
-        BUG_ON(logger != NULL && store == NULL);
+        DEBUG_VALIDATE_BUG_ON(logger == NULL && store != NULL);
+        DEBUG_VALIDATE_BUG_ON(logger != NULL && store == NULL);
     }
 
     return TM_ECODE_OK;
@@ -170,6 +173,9 @@ TmEcode OutputFlowLogThreadInit(ThreadVars *tv, void *initdata, void **data)
 TmEcode OutputFlowLogThreadDeinit(ThreadVars *tv, void *thread_data)
 {
     OutputLoggerThreadData *op_thread_data = (OutputLoggerThreadData *)thread_data;
+    if (op_thread_data == NULL)
+        return TM_ECODE_OK;
+
     OutputLoggerThreadStore *store = op_thread_data->store;
     OutputFlowLogger *logger = list;
 

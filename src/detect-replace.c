@@ -60,16 +60,33 @@ extern int run_mode;
 #include "util-profiling.h"
 
 static int DetectReplaceSetup(DetectEngineCtx *, Signature *, const char *);
-void DetectReplaceRegisterTests(void);
+#ifdef UNITTESTS
+static void DetectReplaceRegisterTests(void);
+#endif
+static int DetectReplacePostMatch(DetectEngineThreadCtx *det_ctx,
+        Packet *p, const Signature *s, const SigMatchCtx *ctx);
 
 void DetectReplaceRegister (void)
 {
     sigmatch_table[DETECT_REPLACE].name = "replace";
-    sigmatch_table[DETECT_REPLACE].Match = NULL;
+    sigmatch_table[DETECT_REPLACE].desc = "only to be used in IPS-mode. Change the following content into another";
+    sigmatch_table[DETECT_REPLACE].url = "/rules/payload-keywords.html#replace";
+    sigmatch_table[DETECT_REPLACE].Match = DetectReplacePostMatch;
     sigmatch_table[DETECT_REPLACE].Setup = DetectReplaceSetup;
-    sigmatch_table[DETECT_REPLACE].Free  = NULL;
+#ifdef UNITTESTS
     sigmatch_table[DETECT_REPLACE].RegisterTests = DetectReplaceRegisterTests;
+#endif
     sigmatch_table[DETECT_REPLACE].flags = (SIGMATCH_QUOTES_MANDATORY|SIGMATCH_HANDLE_NEGATION);
+}
+
+static int DetectReplacePostMatch(DetectEngineThreadCtx *det_ctx,
+        Packet *p, const Signature *s, const SigMatchCtx *ctx)
+{
+    if (det_ctx->replist) {
+        DetectReplaceExecuteInternal(p, det_ctx->replist);
+        det_ctx->replist = NULL;
+    }
+    return 1;
 }
 
 int DetectReplaceSetup(DetectEngineCtx *de_ctx, Signature *s, const char *replacestr)
@@ -139,7 +156,17 @@ int DetectReplaceSetup(DetectEngineCtx *de_ctx, Signature *s, const char *replac
      */
     s->flags |= SIG_FLAG_REQUIRE_PACKET;
     SCFree(content);
+    content = NULL;
 
+    SigMatch *sm = SigMatchAlloc();
+    if (unlikely(sm == NULL)) {
+        SCFree(ud->replace);
+        ud->replace = NULL;
+        goto error;
+    }
+    sm->type = DETECT_REPLACE;
+    sm->ctx = NULL;
+    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_POSTMATCH);
     return 0;
 
 error:
@@ -186,7 +213,7 @@ void DetectReplaceExecuteInternal(Packet *p, DetectReplaceList *replist)
     SCLogDebug("replace: Executing match");
     while (replist) {
         memcpy(replist->found, replist->cd->replace, replist->cd->replace_len);
-        SCLogDebug("replace: injecting '%s'", replist->cd->replace);
+        SCLogDebug("replace: replaced data");
         p->flags |= PKT_STREAM_MODIFIED;
         ReCalculateChecksum(p);
         tlist = replist;
@@ -245,7 +272,7 @@ int DetectReplaceLongPatternMatchTest(uint8_t *raw_eth_pkt, uint16_t pktsize,
     dtv.app_tctx = AppLayerGetCtxThread(&th_v);
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeEthernet(&th_v, &dtv, p, GET_PKT_DATA(p), pktsize, NULL);
+    DecodeEthernet(&th_v, &dtv, p, GET_PKT_DATA(p), pktsize);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -805,16 +832,11 @@ static int DetectReplaceParseTest07(void)
     return result;
 }
 
-
-
-#endif /* UNITTESTS */
-
 /**
  * \brief this function registers unit tests for DetectContent
  */
 void DetectReplaceRegisterTests(void)
 {
-#ifdef UNITTESTS /* UNITTESTS */
 /* matching */
     UtRegisterTest("DetectReplaceMatchTest01", DetectReplaceMatchTest01);
     UtRegisterTest("DetectReplaceMatchTest02", DetectReplaceMatchTest02);
@@ -839,5 +861,5 @@ void DetectReplaceRegisterTests(void)
     UtRegisterTest("DetectReplaceParseTest05", DetectReplaceParseTest05);
     UtRegisterTest("DetectReplaceParseTest06", DetectReplaceParseTest06);
     UtRegisterTest("DetectReplaceParseTest07", DetectReplaceParseTest07);
-#endif /* UNITTESTS */
 }
+#endif /* UNITTESTS */
